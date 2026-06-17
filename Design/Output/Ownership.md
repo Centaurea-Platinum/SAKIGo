@@ -1,0 +1,1 @@
+Predict ownership at end of game.

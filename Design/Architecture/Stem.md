@@ -1,0 +1,1 @@
+Just stick a small group equivariant cnn with regular representation.

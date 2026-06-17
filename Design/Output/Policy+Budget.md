@@ -1,0 +1,2 @@
+Policy and budget are separate targets. Search prior is provided by budget head, policy acts as an additional reward signal that tries to predict the best move. A variety of policy heads, like PolicyWinrate and PolicyScore, can thus be denoted.
+Passing are handled by a separate global head with scalar output PassProb.
