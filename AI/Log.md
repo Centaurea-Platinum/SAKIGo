@@ -2,6 +2,16 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-06-17 — Policy-vs-budget clarification
+
+- Human clarified the intended split: budget stays smooth to guide search allocation; policy can be comparatively sharp because it is liberated from being the search prior and acts as an auxiliary reward/ranking target. Recorded as D17 and narrowed the open issue to exact target construction/loss weighting.
+
+## 2026-06-17 — Workspace evaluation + web context
+
+- Reviewed current workspace from `AI/` outward. Confirmed project remains design/spec only: concise `Design/` notes, no implementation code, and no SAKIGo-specific search spec yet.
+- Web-grounded comparison against AlphaGo Zero, KataGo, Gumbel MuZero, regularized MCTS, FiLM, and G-CNN sources. Main evaluation: direction is coherent and research-aligned; critical blockers remain search/target definitions, policy-vs-budget semantics, pass normalization, and training anchors for subtree harvest.
+- Corrected stale AI context: `Design/Search/` is not empty anymore; it contains the Gumbel policy-improvement PDF reference, but no local spec.
+
 ## 2026-06-17 — Bayesian VOI search direction
 
 - Author leaning toward Bayesian value-of-information leaf selection (expand the leaf most likely to change the root policy). Recorded as D16 (exploring) and detailed the cruxes in [Issues.md](Issues.md): decision-focus vs training-target conflict, argmax-vs-distribution ambiguity, max-node posterior cost.

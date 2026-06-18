@@ -38,7 +38,7 @@ AI collaborators write freely inside `AI/`. Do **not** modify anything outside `
 - [Auxiliary.md](../Design/Output/Auxiliary.md) — heads predicting a main head's future value, g(x_t) = f(x_{t+n}); e.g. ownership, score.
 
 **Pipeline**
-- `../Design/Search/` *(empty, TBD)*
+- `../Design/Search/` — contains the Gumbel MuZero / policy-improvement-by-planning PDF as a reference; SAKIGo's own search spec is still TBD.
 - **Train** — [SearchBasedStudentTeacher.md](../Design/Train/SearchBasedStudentTeacher.md): net (student) distills net+search (teacher) — its result + statistics. [SubTreeHarvest.md](../Design/Train/SubTreeHarvest.md): also train interior search-tree nodes f(x_t^p) → f^m(x_t^p), not just the root, to reuse subtrees. [BestMoveVisit.md](../Design/Train/BestMoveVisit.md): harvest cutoff keyed on best-move visits (vs flat playout cap), routing more compute to uncertain positions. (See D10, D11, D12.)
 
 ## Glossary (the non-obvious terms)
