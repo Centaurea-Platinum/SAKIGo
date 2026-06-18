@@ -5,7 +5,7 @@ Classified so later sessions know what is unsettled. Tags: **[Gap]** missing spe
 ## Gaps — spec not yet written
 
 - **[Gap] Network architecture: shape sketched, sizes open.** Stem (G-CNN, D13), trunk (nested resblocks + register attention, D14), heads (D15) are now framed, but block count, channel width, register-token count, and FiLM site count/placement are unspecified.
-- **[Open] Stem equivariance is partial.** A D4-equivariant stem feeding a non-equivariant trunk yields augmented features, not an equivariant net; equivariance is end-to-end-or-nothing. Decide: group-pool at stem boundary (clean invariant handoff) vs. accept stem as a front-end prior. Also confirm the ×8 regular-rep channel cost beats plain symmetry augmentation. (D13)
+- **[Open] Equivariant register-token attention.** Direction settled (human, 2026-06-18): the whole net is to be equivariant — stem G-CNN, escnn trunk convs, *and* the register-token attention (D13/D14), not a stem-only prior. The hard part is the register attention: registers **read and write** spatial tokens, and plain QKV is **not** equivariant, so it must be built as equivariant/steerable attention over the regular-rep fibers (e.g. invariant query–key scores + equivariant value mixing) — design TBD. Also still confirm the ×8 regular-rep channel cost beats plain symmetry augmentation. (D13, D14)
 - **[Open] Registers vs FiLM redundancy.** Both inject global context into spatial tokens (registers = learned global scratchpad; FiLM = rule conditioning). Confirm they're complementary, or let registers carry rule info and drop one path. (D14, D2)
 - **[Gap] Search undefined.** `../Design/Search/` currently only contains a Gumbel MuZero / policy-improvement-by-planning PDF reference — SAKIGo's own algorithm (MCTS?) and how the budget head's prior feeds it are unspecified. Author has flagged a **PUCT redesign**; candidate directions below.
 
@@ -33,7 +33,7 @@ Classified so later sessions know what is unsettled. Tags: **[Gap]** missing spe
 
 ## Nits
 
-- *(none open)*
+- **[Nit] NonBoardInput "board size" → "area."** [NonBoardInput.md](../Design/Input/NonBoardInput.md) says komi/captures are "normalized via division board size," but the human clarified the intended denominator is board **area** (D4). Correct the Design wording when that file is next edited. (D4)
 
 ## Training design review (2026-06-17)
 

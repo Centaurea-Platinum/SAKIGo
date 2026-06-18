@@ -26,7 +26,7 @@ AI collaborators write freely inside `AI/`. Do **not** modify anything outside `
 
 **Architecture — the network**
 - [Stem.md](../Design/Architecture/Stem.md) — small group-equivariant CNN, regular rep (D4 symmetry). (D13)
-- [Trunk.md](../Design/Architecture/Trunk.md) — KataGo nested residual blocks + register-token QKV attention; no spatial self-attention yet; FiLM sites here. (D14)
+- [Trunk.md](../Design/Architecture/Trunk.md) — KataGo nested residual blocks on escnn **equivariant** convs + register-token QKV attention (no spatial self-attention yet); registers read+write spatial tokens and are designed equivariance-preserving (whole-net equivariant); FiLM sites here. (D14)
 - [Heads.md](../Design/Architecture/Heads.md) — spatial = 1×1 conv, global = attention pooling → MLP. (D15)
 
 **Output — the heads**

@@ -2,6 +2,13 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-06-18 — AI/ vs Design/ cross-check + equivariance correction
+
+- Re-read all of `AI/` and cross-checked every `Design/` note. Found one real discrepancy: [Trunk.md](../Design/Architecture/Trunk.md) specifies **escnn-based equivariant** trunk convs, but the AI notes had recorded the trunk as *non*-equivariant (D14 omitted escnn; the "stem equivariance is partial" issue assumed a non-equivariant trunk).
+- Human clarified: the **whole model is equivariant**, and the register tokens **read+write** spatial tokens but are to be **designed to preserve equivariance**. Rewrote D13 (whole-net equivariance, not a stem-only prior), D14 (escnn convs + equivariant read/write register attention), the Context doc map, and the Issues item (now "equivariant register-token attention" — plain QKV isn't equivariant). Kept the ×8-cost-vs-augmentation question.
+- Normalization: human clarified NonBoardInput's "board size" meant board **area** (matches score head D7). Updated D4; logged a Nit to fix the Design wording when that file is next edited.
+- Edits confined to `AI/`; no `Design/` files changed.
+
 ## 2026-06-17 — Policy-vs-budget clarification
 
 - Human clarified the intended split: budget stays smooth to guide search allocation; policy can be comparatively sharp because it is liberated from being the search prior and acts as an auxiliary reward/ranking target. Recorded as D17 and narrowed the open issue to exact target construction/loss weighting.

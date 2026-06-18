@@ -16,5 +16,5 @@ Suicide:
     (2) No
 
 Komi + CapturedStones: 
-    #This is two scalars in [-1,1], normalized via division board size. CapturedStones(My-Opponent) can exceed board size, but I can leave it out.
+    #This is two scalars in [-1,1], normalized via division board area. CapturedStones(My-Opponent) can exceed board area, but I can leave it out.
     #Handicap related rules are handled by komi value implicitly
