@@ -1,1 +1,1 @@
-A length 3 vector encoding win/loss/draw probabilities.
+A length 3 vector encoding win/draw/loss probabilities.

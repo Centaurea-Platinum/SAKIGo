@@ -1,6 +1,8 @@
 Go's ruleset are very complicated. Furthermore, it does not map neatly to a hypercube, as some rules naturally excludes others. Thus, only a subset of rules are used to avoid overhead and rare sampling, and a one-hot encoding for correlated rules are used.
 The actual structure of a single one-hot will be something like [1,0,0], [0,1,0], or [0,0,1], but for simplicity, I will be recording them as an enumeration(1,2,3), and the vector length wil be implied.
-In the engine, different one-hot will be concated into a single vector, and feeded into two mlp for each film(bias+scale) injection site.
+In the engine, the one-hot vectors will be concated into a single vector then one or both of the approach will be used:
+    Feed into mlp(s) to initialize register tokens
+    Feed into two mlp for each film(bias+scale) injection site.
 Scoring:
     (1) Area
     (2) Area + AncientChinese   #Penalized 2 points for each unconnected piece of alive group

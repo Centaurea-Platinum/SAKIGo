@@ -1,0 +1,1 @@
+As an alternate approach, in positions with high policy entropy, the selfplay engine could choose to branch.

@@ -8,11 +8,17 @@ A new Go AI ("New GoAI" — see [../README.md](../README.md)). KataGo-style dire
 
 ## Current phase
 
-**Design / specification only — no code yet.** All substance lives as notes under `../Design/`. Input and Output are sketched; the network, search, and training specs are still mostly empty (see [Issues.md](Issues.md)).
+**Design / specification only — no SAKIGo code yet** (running code lives outside the repo: the `../VibeKatago/` sandbox and the sibling testbed below). All substance lives as notes under `../Design/`. Input, Output, and Architecture are sketched; the search spec and most of the training loop are still open (see [Issues.md](Issues.md)).
+
+## Sibling testbed (2026-07-03)
+
+`D:\stuff\Documents\SquareAccumulationK-Isolation` — the owner's boardgame-AI playground (n×n fill game with exact-solved 3×3–5×5 game trees; a D4-equivariant attention model in PyTorch trained on exact labels; same laptop GPU). It doubles as SAKIGo's rehearsal ground, and its AI notes cross-reference SAKIGo. Already delivered: the equivariant read+write register attention (SAKIGo's hardest open architecture item — see [Issues.md](Issues.md)) and inference-lever measurements for a future self-play loop (CUDA-graph replay ≈10× on batch-1 latency; bf16 ≈2–3× compute-bound and halves memory). Natural venue for SAKIGo A/Bs that need exact ground truth: ×8 regular-rep vs augmentation, register-seeded rule conditioning (center-ban variant).
 
 ## Boundary
 
 AI collaborators write freely inside `AI/`. Do **not** modify anything outside `AI/` (notably `../Design/`, `../README.md`) without an explicit request. Full charter: [Guide.md](Guide.md).
+
+**Authorized experiments area (2026-06-19):** the human granted permission to create and work inside `../VibeKatago/` — an experiments sandbox holding a clone of KataGo, for training small-net experiments that test SAKIGo's ideas (self-play training, minimal input, subtree harvest, etc.). Write and run freely there; it is kept out of the SAKIGo design repo's git tracking. `Design/` and `README.md` stay read-only-without-asking.
 
 ## Collaboration preferences
 
@@ -39,7 +45,7 @@ AI collaborators write freely inside `AI/`. Do **not** modify anything outside `
 
 **Pipeline**
 - `../Design/Search/` — contains the Gumbel MuZero / policy-improvement-by-planning PDF as a reference; SAKIGo's own search spec is still TBD.
-- **Train** — [SearchBasedStudentTeacher.md](../Design/Train/SearchBasedStudentTeacher.md): net (student) distills net+search (teacher) — its result + statistics. [SubTreeHarvest.md](../Design/Train/SubTreeHarvest.md): also train interior search-tree nodes f(x_t^p) → f^m(x_t^p), not just the root, to reuse subtrees. [BestMoveVisit.md](../Design/Train/BestMoveVisit.md): harvest cutoff keyed on best-move visits (vs flat playout cap), routing more compute to uncertain positions. (See D10, D11, D12.)
+- **Train** — [SearchBasedStudentTeacher.md](../Design/Train/SearchBasedStudentTeacher.md): **self-play RL** — net (student) distills its *own* net+search over self-play games (teacher) — result + statistics, outcome-grounded by z (D10; *not* offline external-teacher distillation). [SubTreeHarvest.md](../Design/Train/SubTreeHarvest.md): also train interior search-tree nodes f(x_t^p) → f^m(x_t^p), not just the root, to reuse subtrees. [BestMoveVisit.md](../Design/Train/BestMoveVisit.md): harvest cutoff keyed on best-move visits (vs flat playout cap), routing more compute to uncertain positions. (See D10, D11, D12.)
 
 ## Glossary (the non-obvious terms)
 

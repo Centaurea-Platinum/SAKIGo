@@ -1,3 +1,2 @@
-The main body will be a convolution based nested residual blocks like katago, with escnn based equivariance convolution
-Spatial attention will not be added yet.
+The main body will be a equivariance attention based nested residual blocks like katago, with custom implementation.
 Register tokens will be used, qkv attention applied between register tokens and each spatial token.
