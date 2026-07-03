@@ -1,0 +1,11 @@
+[package]
+name = "sakigo-engine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "sakigo_engine"
+path = "src/lib.rs"
+
+[dependencies]

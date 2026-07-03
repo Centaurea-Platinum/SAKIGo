@@ -1,0 +1,1 @@
+The engine does a lossy projection of the game state to the neural net. It handles stuff like history through hashing.
