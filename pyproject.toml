@@ -1,0 +1,26 @@
+[project]
+name = "sakigo"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy==1.26.4",
+    "pytest==9.0.2",
+    "torch==2.11.0+cu128",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.pytest.ini_options]
+pythonpath = [".", "Model"]
+testpaths = ["Model"]
+python_files = ["test_*.py"]
+addopts = "-q"
