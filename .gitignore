@@ -1,6 +1,7 @@
 .venv/
 .uv-cache/
 .pytest_cache/
+.pytest_tmp/
 __pycache__/
 *.py[cod]
 Model/random_models/
@@ -9,3 +10,5 @@ target/
 Distillation/downloads/
 Distillation/engine/
 Distillation/models/
+Training/data/
+Training/runs/

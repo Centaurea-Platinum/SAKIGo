@@ -2,11 +2,67 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-03 - Fixed slow batch sweep (WDDM paging, not OOM)
+
+- Root cause: on Windows/WDDM, oversized batches do not raise `OutOfMemoryError` - the driver spills into shared system memory and runs at paging speed, so the sweep's OOM catch never fired and oversized candidates ground through all timed steps (model1 attention at batch 512 projects ~14 GiB on a 12 GiB card).
+- Fix in [run_phase1_suite.py](../Training/run_phase1_suite.py): peak-allocation check after the first step against a `--memory-fraction` budget (default 0.8 x dedicated VRAM), predictive skip of larger candidates by linear peak extrapolation, `--sweep-max-seconds` time cap on the timed loop, and early stop when throughput declines below 0.97 x best. Sweep lines now print peak GiB.
+- Verified on GPU across the full 128-1024 range: model1 picks 256 (7.1 GiB peak), 512 skipped by projection; control_params measures through 512 and skips 1024; whole sweep runs in seconds. Optional extra hardening: NVIDIA driver "Prefer No Sysmem Fallback" makes overflow fail fast globally.
+
+## 2026-07-03 - Self-play eval harness (paired matches, Elo, SGF)
+
+- Added [selfplay_eval.py](../Training/selfplay_eval.py): paired color-reversed matches between two players (checkpoint raw-policy agents with legal masking + optional temperature, or a uniform-random baseline that passes only when forced). Reuses the Phase 1 generator's `Game` (Tromp-Taylor rules and exact board/rule encoding), shares one seeded uniform-random opening per pair, adjudicates at two passes or a ply cap via a new Tromp-Taylor area scorer, and reports winrate with Wilson 95% CI, Elo diff, and per-pair 2-0/1-1/0-2 counts. Outputs games.jsonl, summary.json, and one SGF per game.
+- Tests: scorer unit test (empty/one-color/contested boards) and a CPU random-vs-random match smoke (shared openings, outputs) - 8/8 passing. GPU smoke: 4-step suite_smoke model1 checkpoint vs random, 4 games completed (~31 plies/s), summary/SGF written.
+- Known gaps recorded in Issues: Python legality is the throughput bottleneck (~30 plies/s -> long full matches), ply-cap adjudication scores unfinished games by raw area (vibego used a neutral strong judge), players are raw-policy only until search exists.
+
+## 2026-07-03 - Three-model suite runner, D4 augmentation, progress bar
+
+- Added [run_phase1_suite.py](../Training/run_phase1_suite.py): per-spec batch-size throughput sweep (OOM-aware, bf16 + fused AdamW, reuses `_train_batch`), then sequential subprocess training of `model1`, `model1_control_params`, `model1_control_compute` with an equal samples-seen budget (`--epochs` over the train split) and a final val-loss summary. Non-equivariant (ScalarSakiGoModel) specs automatically get `--augment-d4`.
+- Added `augment_record_d4` to [data.py](../Training/data.py) (random D4 symmetry per training sample: board planes, ownership, policy/budget board parts, legal mask; pass entry and global fields untouched) plus a unit test; `--augment-d4` wired into both trainer loading paths (train batches only, val untouched).
+- Added `--progress` to [train.py](../Training/train.py): in-place ASCII bar (step, samples/s, ETA, last loss), auto-on for TTY, clears around log lines.
+- Verification: 6/6 pytest; full suite smoke on the 512-record subset ran all three specs (augment flag applied to the two controls) and printed plan + summary. Sweep datum at batch 128: model1 ~380 samples/s, control_params ~1,080, control_compute ~410 — consistent with the compute-matched design intent.
+
+## 2026-07-03 - Training-throughput optimizations landed
+
+- Data path: `TrainingRecord` is now numpy-backed; JSONL decoding moved to buffer-insert with vectorized validation (no per-batch `json.loads`), buffer budget counts decoded array bytes, and `collate` numpy-stacks with pinned memory + non-blocking H2D. Added `BatchPrefetcher` (default `--prefetch-batches 2`) assembling CPU batches on a background thread; the streaming buffer got an internal lock and eval sampling no longer advances the ingest stream.
+- GPU path: bf16 autocast by default on CUDA (`--amp off` to disable), fused AdamW, branchless masked losses (removed 5 per-step `.item()` syncs), and opt-in `--cuda-graphs` (new [graph_step.py](../Training/graph_step.py)): 3 counted eager warmup steps on a side stream, then full-step capture (zero/forward/losses/backward/clip/step) with capturable AdamW. Skipped `torch.compile` — Inductor needs Triton, unavailable on native Windows.
+- Verification: 5/5 pytest (needs `--basetemp` on this machine; system temp denies access). GPU smokes on real Phase 1 records: graphs trajectory matches eager to ~3 decimals at same seed. 300 steps @ batch 128: baseline 219s -> bf16+prefetch 126s -> +graphs 122s (~1.8x; batch-128 training is compute-bound, so graphs add little here — their payoff is batch-1 search latency later).
+- Caveats: exact resume determinism is relaxed under prefetch (buffer contents timing-dependent; stream position was already not checkpointed). Startup full-file scan remains; binary shards still the right long-run fix.
+
+## 2026-07-03 - Added streaming JSONL training buffer
+
+- Added `--stream-buffer-mb` to [train.py](../Training/train.py). `0` keeps the old eager loader; positive values use a rolling raw-line JSONL buffer capped by the requested MiB budget, with deterministic train/validation splitting by `(seed, board_size, position_key)`.
+- Added stream metadata scanning and `StreamingJsonlBuffer` in [data.py](../Training/data.py), plus a streaming train smoke in [test_training_orchestrator.py](../Training/test_training_orchestrator.py).
+- Verification: `uv --cache-dir .uv-cache run --frozen pytest Training/test_training_orchestrator.py` passed (`5 passed`). A generated-slice streaming smoke passed. A full-file 1-step smoke on `Training/data/katago_phase1_20260703_172838/samples.jsonl` passed with `--stream-buffer-mb 64`; config recorded 262,144 rows, 236,411 train records, 25,733 validation records, and a 64 MiB buffer holding 2,886 raw records.
+
+## 2026-07-03 - Checked Phase 1 sample training readiness
+
+- Created a 512-record slice from `Training/data/katago_phase1_20260703_172838/samples.jsonl` and ran `Training.train` for 2 steps with `model1`, board size 19, batch size 2, and the current five-head losses. The smoke run completed and wrote metrics/checkpoints under `Training/runs/train_smoke_generated_readiness/`.
+- Readiness verdict: the generated records have the labels needed by the current trainer, and the model/loss/data contract is working on a real generated subset. Full-scale training is not ready yet because `Training.train` eagerly loads the whole JSONL into Python records and groups, which is unsuitable for the 5.7 GB 2^18-sample file. Next implementation step is a streaming/sharded/binary data path.
+
+## 2026-07-03 - Started 2^18 KataGo Phase 1 generation run
+
+- Added [generate_katago_phase1.py](../Training/generate_katago_phase1.py), a schema-v1 JSONL generator that keeps concurrent KataGo analysis games/positions in flight, writes SAKIGo board/rule tensors, maps raw KataGo policy to budget, maps top-1 to policy, and converts WDL/score/ownership from BLACK to current-player perspective.
+- Smoke-tested 64 samples and loaded them through `Training.data.load_records`: board planes/rules/ownership/legal-mask lengths and WDL/policy/budget normalization checked out.
+- Launched run `katago_phase1_20260703_172838` for 262,144 samples using `nnMaxBatchSize=20`, `numAnalysisThreads=40`, and 40 concurrent games. Initial live checkpoint: 8,192 / 262,144 samples, about 230 samples/s, ETA about 18 minutes. Output: `Training/data/katago_phase1_20260703_172838/samples.jsonl`; status: `Training/data/katago_phase1_20260703_172838/status.json`; logs: `Training/runs/katago_phase1_20260703_172838/`.
+- Completion check: status reached `complete`, process exited cleanly, output size is about 5.7 GB, and a streaming pass counted exactly 262,144 JSONL rows. Spot-validation through `record_from_json` at lines 1, 2, 3, 65,536, 131,072, 196,608, and 262,144 confirmed board/rule/target lengths and WDL/policy/budget sums.
+
+## 2026-07-03 - Tuned KataGo batch-inference throughput
+
+- Benchmarked the local TensorRT KataGo v1.16.5 teacher for Phase 1 sample generation using unique four-move 19x19 positions, `maxVisits: 1`, `includePolicy`, `includeOwnership`, and `includeNoResultValue`. Measured only steady-state after the engine reported ready.
+- Best measured setting: `nnMaxBatchSize=20`, `numAnalysisThreads=40`, `numSearchThreadsPerAnalysisThread=1`, about 226-227 samples/s. Batch 16 / 32 threads was effectively tied but slightly lower on the confirmation run; larger batches filled correctly but were slower (`32` about 214, `64` about 204, `128` about 197 samples/s in the no-cache sweep).
+- Recorded the empirical setting as D22 in [Decisions.md](Decisions.md) and added the missing reusable generator/config item to [Issues.md](Issues.md). Removed transient `analysis_logs/`; kept generated TensorRT timing caches under ignored `Distillation/engine/.../KataGoData/trtcache/`.
+
+## 2026-07-03 - Checked Phase 1 KataGo data readiness
+
+- Read the owner's updated [Target.md](../Design/Distillation/Target.md): Phase 1 maps KataGo raw policy to the budget head, derives the policy head from the top-1 move, and expects other current heads to map cleanly.
+- Recorded D21 in [Decisions.md](Decisions.md) and updated [Issues.md](Issues.md): the labels are available from KataGo analysis output if queries include policy/ownership/no-result fields, but ingestion still needs a parser, saved position metadata, illegal-policy handling, perspective conversion, and a small emitted-schema pilot before large generation.
+- Ran the local pilot through KataGo v1.16.5/TensorRT. First run built `KataGoData/trtcache/...` and showed this build rejects `analysisPVLen: 0`; reruns with `analysisPVLen: 1` succeeded. Verified empty-board output has policy length 362, ownership length 361, raw value fields, and policy sum ~= 1. Verified an occupied-point sample after `B D4` reports currentPlayer W and marks row-major index 288 as illegal (`-1`). Removed transient `analysis_logs/`; kept the useful TensorRT cache artifact.
+
 ## 2026-07-03 - Examined KataGo analysis output contract
 
 - Read the bundled KataGo v1.16.5 README/config and the official Analysis Engine docs. The local smoke test reached TensorRT initialization on the RTX GPU but timed out while creating the timing cache before returning a JSON line; no KataGo process remained afterward, and the temporary `analysis_logs/` directory was removed.
-- Updated [Design/Distillation/Target.md](../Design/Distillation/Target.md): Phase 1 should request `includePolicy` and `includeOwnership`, use `policy`, `ownership`, and `rootInfo.raw*` where present, treat `moveInfos` as audit/high-visit data for Phase 1, and convert the bundled BLACK-perspective analysis output into SAKIGo current-player targets.
-- Added the missing KataGo analysis JSON importer to [Issues.md](Issues.md), including row-major board order, pass-last policy, illegal `-1` policy entries, and perspective conversion.
+- Recorded the missing KataGo analysis JSON importer in [Issues.md](Issues.md), including `includePolicy`, `includeOwnership`, row-major board order, pass-last policy, illegal `-1` policy entries, `rootInfo.raw*` value fields, and BLACK-to-current-player perspective conversion.
+- Restored [Design/Distillation/Target.md](../Design/Distillation/Target.md) to the owner's short phase sketch after the human clarified that design docs should not be edited for findings unless asked.
 
 ## 2026-07-03 — Synced AI notes with code-bearing workspace
 

@@ -15,7 +15,7 @@ The repo is no longer design-only. It now has:
 - `Model/`: a PyTorch model package with D4-equivariant and scalar-control variants.
 - `Distillation/`: local KataGo teacher assets and a phase sketch; downloaded engines/models are artifacts, not source.
 
-Search, final scoring, end-of-game adjudication, full training losses, self-play, and exact KataGo teacher projection are still not implemented.
+Search, final scoring, end-of-game adjudication, self-play, and exact KataGo teacher projection are still not implemented.
 
 ## Implementation map
 
@@ -23,6 +23,10 @@ Search, final scoring, end-of-game adjudication, full training losses, self-play
 - [Model/README.md](../Model/README.md) - PyTorch model package. Public API is `forward(board, rules)`, with outputs `wdl_logits`, `score`, `ownership_logits`, `policy_logits`, and `budget_logits`.
 - [Design/ModelSpecs.md](../Design/ModelSpecs.md) - JSON-compatible model specs consumed by `Model/sakigo_model/specs.py`. Defines `model1`, `model1_control_params`, and `model1_control_compute`.
 - [Model/sakigo_model/adapters.py](../Model/sakigo_model/adapters.py) - canonical game-state projections for SAKIGo and KataGo distillation scaffolding.
+- [Training/generate_katago_phase1.py](../Training/generate_katago_phase1.py) - KataGo Phase 1 data generator. Keeps concurrent games/positions in flight, writes schema-v1 JSONL records, and maps KataGo analysis output into SAKIGo heads.
+- [Training/train.py](../Training/train.py) - JSONL trainer for the current five heads. Default mode still eager-loads records for small runs; pass `--stream-buffer-mb N` for the bounded-memory streaming path (decode-at-insert numpy records). Defaults include bf16 autocast on CUDA, fused AdamW, and a 2-deep background batch prefetcher; `--cuda-graphs` opts into full-step graph capture (single board size, fixed batch); `--augment-d4` applies random board symmetries for non-equivariant models; `--progress` renders a terminal progress bar.
+- [Training/run_phase1_suite.py](../Training/run_phase1_suite.py) - sequential Phase 1 suite: sweeps batch size per model spec, then trains `model1` and both scalar controls with equal samples-seen budgets, auto-enabling D4 augmentation for the controls.
+- [Training/selfplay_eval.py](../Training/selfplay_eval.py) - paired color-reversed evaluation matches between checkpoint raw-policy players (or the random baseline), with Tromp-Taylor adjudication, Elo + Wilson CI, and JSONL/SGF game dumps. Reuses the generator's rules/encoding.
 - [pyproject.toml](../pyproject.toml) - Python environment; pinned to Python 3.12 and CUDA PyTorch `2.11.0+cu128`.
 
 ## Boundary
@@ -69,7 +73,7 @@ Keep the AI notes current without waiting to be prompted: when code, design docs
 - [SubTreeHarvest.md](../Design/Train/SubTreeHarvest.md) - train interior search-tree nodes in addition to the root.
 - [BestMoveVisit.md](../Design/Train/BestMoveVisit.md) - harvest cutoff keyed on best-move visits.
 - [BranchedGames.md](../Design/Train/BranchedGames.md) - possible branching in high-policy-entropy positions.
-- [Design/Distillation/Target.md](../Design/Distillation/Target.md) - phase sketch: phase 1 distills a 1-visit teacher net; phase 2 fine-tunes on high-visit data. Reconcile this with the older self-play-only D10 framing before treating training as settled.
+- [Design/Distillation/Target.md](../Design/Distillation/Target.md) - phase sketch: phase 1 distills a 1-visit teacher net, mapping KataGo raw policy to budget and top-1 to policy; phase 2 fine-tunes on high-visit data. Reconcile this external-teacher bootstrap with the older self-play-only D10 framing before treating training as settled.
 
 ## Glossary
 

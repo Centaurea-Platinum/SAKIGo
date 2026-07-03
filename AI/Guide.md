@@ -12,6 +12,7 @@ Be concise. The human values low reading cost. Lead with the answer, keep recaps
 
 - You may create and edit files in `AI/` without asking.
 - Do not modify `Design/`, `Model/`, `Engine/`, root READMEs, or other non-AI files unless the human explicitly asks.
+- Do not use `Design/` as a scratchpad for research findings, protocol notes, or inferred contracts; document those in `AI/` unless the human asks to edit design docs.
 - When the human does ask for non-AI work, make the smallest coherent change and then update the AI notes if the ground truth changed.
 
 ## Memory Duty

@@ -21,6 +21,6 @@ explicit = true
 
 [tool.pytest.ini_options]
 pythonpath = [".", "Model"]
-testpaths = ["Model"]
+testpaths = ["Model", "Training"]
 python_files = ["test_*.py"]
 addopts = "-q"
