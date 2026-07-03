@@ -1,0 +1,11 @@
+.venv/
+.uv-cache/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+Model/random_models/
+analysis_logs/
+target/
+Distillation/downloads/
+Distillation/engine/
+Distillation/models/
