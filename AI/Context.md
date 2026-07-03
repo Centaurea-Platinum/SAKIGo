@@ -1,54 +1,80 @@
-# Durable Context — SAKIGo
+# Durable Context - SAKIGo
 
-Long-term memory for AI collaborators: facts that stay true across sessions. Read this before acting; update it when the ground truth changes.
+Long-term memory for AI collaborators. Read this before acting, then update it when the repo's ground truth changes.
 
 ## What SAKIGo is
 
-A new Go AI ("New GoAI" — see [../README.md](../README.md)). KataGo-style direction: a neural net (stem → trunk → heads) paired with search, and *multi-rule aware* — scoring / ko / suicide variants are selectable at inference rather than baked in.
+SAKIGo is a new Go AI ("New GoAI"; see [../README.md](../README.md)). Direction: KataGo-style neural network plus search, with selectable scoring / ko / suicide rules at inference instead of a single baked-in ruleset.
 
 ## Current phase
 
-**Design / specification only — no SAKIGo code yet** (running code lives outside the repo: the `../VibeKatago/` sandbox and the sibling testbed below). All substance lives as notes under `../Design/`. Input, Output, and Architecture are sketched; the search spec and most of the training loop are still open (see [Issues.md](Issues.md)).
+The repo is no longer design-only. It now has:
 
-## Sibling testbed (2026-07-03)
+- `Design/`: concise source-of-truth design notes and model specs.
+- `Engine/`: a Rust rules and encoding crate.
+- `Model/`: a PyTorch model package with D4-equivariant and scalar-control variants.
+- `Distillation/`: local KataGo teacher assets and a phase sketch; downloaded engines/models are artifacts, not source.
 
-`D:\stuff\Documents\SquareAccumulationK-Isolation` — the owner's boardgame-AI playground (n×n fill game with exact-solved 3×3–5×5 game trees; a D4-equivariant attention model in PyTorch trained on exact labels; same laptop GPU). It doubles as SAKIGo's rehearsal ground, and its AI notes cross-reference SAKIGo. Already delivered: the equivariant read+write register attention (SAKIGo's hardest open architecture item — see [Issues.md](Issues.md)) and inference-lever measurements for a future self-play loop (CUDA-graph replay ≈10× on batch-1 latency; bf16 ≈2–3× compute-bound and halves memory). Natural venue for SAKIGo A/Bs that need exact ground truth: ×8 regular-rep vs augmentation, register-seeded rule conditioning (center-ban variant).
+Search, final scoring, end-of-game adjudication, full training losses, self-play, and exact KataGo teacher projection are still not implemented.
+
+## Implementation map
+
+- [Engine/README.md](../Engine/README.md) - Rust rules/encoding engine. Owns board topology, captures, suicide, simple ko, positional superko, pass moves, history hashes, capture accounting, and feature encoding.
+- [Model/README.md](../Model/README.md) - PyTorch model package. Public API is `forward(board, rules)`, with outputs `wdl_logits`, `score`, `ownership_logits`, `policy_logits`, and `budget_logits`.
+- [Design/ModelSpecs.md](../Design/ModelSpecs.md) - JSON-compatible model specs consumed by `Model/sakigo_model/specs.py`. Defines `model1`, `model1_control_params`, and `model1_control_compute`.
+- [Model/sakigo_model/adapters.py](../Model/sakigo_model/adapters.py) - canonical game-state projections for SAKIGo and KataGo distillation scaffolding.
+- [pyproject.toml](../pyproject.toml) - Python environment; pinned to Python 3.12 and CUDA PyTorch `2.11.0+cu128`.
 
 ## Boundary
 
-AI collaborators write freely inside `AI/`. Do **not** modify anything outside `AI/` (notably `../Design/`, `../README.md`) without an explicit request. Full charter: [Guide.md](Guide.md).
+AI collaborators may write freely inside `AI/`. Do not modify `Design/`, `Model/`, `Engine/`, `README.md`, or other non-AI files unless the human explicitly asks. The human did explicitly ask on 2026-07-03 to maintain the worktree and reconcile AI notes with current docs/code.
 
-**Authorized experiments area (2026-06-19):** the human granted permission to create and work inside `../VibeKatago/` — an experiments sandbox holding a clone of KataGo, for training small-net experiments that test SAKIGo's ideas (self-play training, minimal input, subtree harvest, etc.). Write and run freely there; it is kept out of the SAKIGo design repo's git tracking. `Design/` and `README.md` stay read-only-without-asking.
+Keep the AI notes current without waiting to be prompted: when code, design docs, READMEs, or project direction change, update `AI/Context.md`, `AI/Decisions.md`, `AI/Issues.md`, and `AI/Log.md` in the same working session.
+
+**Authorized experiments area (2026-06-19):** the human granted permission to create and work inside `../VibeKatago/`, an experiments sandbox for training small-net ideas. It is outside this repo's git tracking.
+
+**Sibling testbed (2026-07-03):** `D:\stuff\Documents\SquareAccumulationK-Isolation` is the owner's exact-solved boardgame-AI playground. It supplied the register/attention reference that SAKIGo's current model package now adapts.
 
 ## Collaboration preferences
 
-- **Be concise.** The human optimizes for token cost and reading time — default to short answers, lead with the answer, cut preamble and recap. (Reinforces the charter's "Be concise.")
+- Be concise. Lead with the answer, avoid long recaps unless asked.
+- Prefer updating existing notes over creating new process docs.
+- If a design note and implementation disagree, name the discrepancy in `AI/Issues.md` instead of silently smoothing it over.
 
 ## Design-doc map
 
-**Input — how a position is encoded**
-- [BoardInput.md](../Design/Input/BoardInput.md) — 4 board planes: Boundary (also enables non-rectangular boards), MyStones, OpponentStones, NonTrivialIllegal (suicide / ko / superko). Deliberately minimal; no history plane (see D9 — prior intentionally dropped).
-- [NonBoardInput.md](../Design/Input/NonBoardInput.md) — rule settings as one-hots → MLPs → FiLM (bias+scale) injected into the trunk; komi & captured-stones as normalized scalars.
+**Input - how a position is encoded**
+- [BoardInput.md](../Design/Input/BoardInput.md) - six board planes: MyStones, OpponentStones, EmptyPositions, BoundaryCorner, BoundaryEdge, NonTrivialIllegal.
+- [NonBoardInput.md](../Design/Input/NonBoardInput.md) - rule one-hots plus normalized komi and capture-difference scalars. Default path seeds register tokens; FiLM is optional future plumbing.
+- [Markov.md](../Design/Input/Markov.md) - the neural input is lossy, but the engine keeps history/hash state and exposes legality through encoding.
 
-**Architecture — the network**
-- [Stem.md](../Design/Architecture/Stem.md) — small group-equivariant CNN, regular rep (D4 symmetry). (D13)
-- [Trunk.md](../Design/Architecture/Trunk.md) — KataGo nested residual blocks on escnn **equivariant** convs + register-token QKV attention (no spatial self-attention yet); registers read+write spatial tokens and are designed equivariance-preserving (whole-net equivariant); FiLM sites here. (D14)
-- [Heads.md](../Design/Architecture/Heads.md) — spatial = 1×1 conv, global = attention pooling → MLP. (D15)
+**Architecture - the network**
+- [Stem.md](../Design/Architecture/Stem.md) - small D4 group-equivariant stem using regular representations.
+- [EquivariantAttention.md](../Design/Architecture/EquivariantAttention.md) - left-regular feature convention, canonical-frame positional embedding, equivariant QKV/channel mixing, and shared pointwise nonlinearities.
+- [Trunk.md](../Design/Architecture/Trunk.md) - D4-equivariant spatial attention in nested residual blocks plus register-token attention.
+- [Heads.md](../Design/Architecture/Heads.md) - spatial heads use 1x1 convs over board features; global heads use MLPs over register tokens.
 
-**Output — the heads**
-- [SpatialGlobalDistinction.md](../Design/Output/SpatialGlobalDistinction.md) — spatial heads = conv (board-shaped); global heads = pooled (scalars).
-- [Winrate.md](../Design/Output/Winrate.md) — length-3 win / loss / draw.
-- [Score.md](../Design/Output/Score.md) — scalar score ÷ board area now; percentile heads later.
-- [Ownership.md](../Design/Output/Ownership.md) — end-of-game ownership (spatial).
-- [Policy+Budget.md](../Design/Output/Policy+Budget.md) — budget = search prior; policy = reward signal (PolicyWinrate / PolicyScore); pass via separate global PassProb.
-- [Auxiliary.md](../Design/Output/Auxiliary.md) — heads predicting a main head's future value, g(x_t) = f(x_{t+n}); e.g. ownership, score.
+**Output - the heads**
+- [SpatialGlobalDistinction.md](../Design/Output/SpatialGlobalDistinction.md) - spatial heads are board-shaped; global heads are spatial-independent register outputs.
+- [Winrate.md](../Design/Output/Winrate.md) - length-3 win/draw/loss output.
+- [Score.md](../Design/Output/Score.md) - scalar score divided by board area first; percentile heads later.
+- [Ownership.md](../Design/Output/Ownership.md) - end-of-game ownership.
+- [Policy+Budget.md](../Design/Output/Policy+Budget.md) - policy and budget are separate targets; pass is the final logit in the shared `N*N + 1` action vector. Current design says train without masking illegal moves and mask them only as an inference precaution.
+- [Auxiliary.md](../Design/Output/Auxiliary.md) - auxiliary heads predict future main-head values.
 
 **Pipeline**
-- `../Design/Search/` — contains the Gumbel MuZero / policy-improvement-by-planning PDF as a reference; SAKIGo's own search spec is still TBD.
-- **Train** — [SearchBasedStudentTeacher.md](../Design/Train/SearchBasedStudentTeacher.md): **self-play RL** — net (student) distills its *own* net+search over self-play games (teacher) — result + statistics, outcome-grounded by z (D10; *not* offline external-teacher distillation). [SubTreeHarvest.md](../Design/Train/SubTreeHarvest.md): also train interior search-tree nodes f(x_t^p) → f^m(x_t^p), not just the root, to reuse subtrees. [BestMoveVisit.md](../Design/Train/BestMoveVisit.md): harvest cutoff keyed on best-move visits (vs flat playout cap), routing more compute to uncertain positions. (See D10, D11, D12.)
+- [Design/Engine/Scope.md](../Design/Engine/Scope.md) - engine performs the lossy projection and handles history through hashing.
+- `Design/Search/` - currently only contains the Gumbel MuZero / policy-improvement-by-planning PDF reference; no SAKIGo search spec yet.
+- [SearchBasedStudentTeacher.md](../Design/Train/SearchBasedStudentTeacher.md) - self-play framing: student distills net+search results/statistics.
+- [SubTreeHarvest.md](../Design/Train/SubTreeHarvest.md) - train interior search-tree nodes in addition to the root.
+- [BestMoveVisit.md](../Design/Train/BestMoveVisit.md) - harvest cutoff keyed on best-move visits.
+- [BranchedGames.md](../Design/Train/BranchedGames.md) - possible branching in high-policy-entropy positions.
+- [Design/Distillation/Target.md](../Design/Distillation/Target.md) - phase sketch: phase 1 distills a 1-visit teacher net; phase 2 fine-tunes on high-visit data. Reconcile this with the older self-play-only D10 framing before treating training as settled.
 
-## Glossary (the non-obvious terms)
+## Glossary
 
-- **FiLM** — Feature-wise Linear Modulation: a per-channel bias+scale that conditions the trunk on the active rule settings.
-- **Budget head** — predicts per-move search allocation; supplies the search prior (distinct from policy).
-- **Percentile score head** — score expressed as predicted percentiles: generalizes across board sizes, encodes multimodal outcomes, and is steadier to train than an MDN.
+- **FiLM** - Feature-wise Linear Modulation, an optional future per-channel bias/scale add-on for rule conditioning.
+- **Budget head** - predicts per-move search allocation / search prior, distinct from the policy head.
+- **Regular representation** - D4 feature layout with one component for each of the 8 board symmetries.
+- **Register tokens** - global tokens shaped as regular features in the main model; they are equivariant, not merely invariant.
+- **Scalar controls** - non-equivariant `ScalarSakiGoModel` variants used to separate symmetry benefits from parameter count or dense compute width.

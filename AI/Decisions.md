@@ -2,6 +2,18 @@
 
 The *why* behind design choices, so later sessions don't relitigate settled ground or lose the reasoning. Newest first. Entries are living until built, then they freeze.
 
+## D20 - Engine owns legality, history, and neural encoding (2026-07-03, implemented)
+
+The Rust engine is the deterministic source of truth for board topology, captures, suicide, simple ko, positional superko, pass moves, capture accounting, history hashes, and model input encoding. The neural net still receives a lossy no-history projection, but `Engine/src/game.rs` keeps the state needed to compute legality, and `Engine/src/encoder.rs` emits the six board planes plus ten rule features from the side-to-move perspective. **Why:** search, training data generation, and inference masking should share one rule implementation instead of duplicating ko/capture/history logic in Python or in the model. Source: [Engine/README.md](../Engine/README.md), [Scope.md](../Design/Engine/Scope.md), [encoder.rs](../Engine/src/encoder.rs).
+
+## D19 - Model specs are data-backed and include scalar controls (2026-07-03, implemented)
+
+`Design/ModelSpecs.md` is a JSON-compatible spec consumed by `Model/sakigo_model/specs.py`. It defines the main D4-equivariant `model1` plus two non-equivariant scalar controls: `model1_control_params` for approximate trainable-parameter matching and `model1_control_compute` for active scalar feature-width matching. **Why:** the project needs to test whether the D4 regular model wins because of symmetry structure, parameter count, or raw dense width. Source: [ModelSpecs.md](../Design/ModelSpecs.md), [Model/README.md](../Model/README.md), [scalar_model.py](../Model/sakigo_model/scalar_model.py).
+
+## D18 - Model v1 uses register-seeded D4 attention with no FiLM branch (2026-07-03, implemented)
+
+The implemented `SakiGoModel` lifts `[B,6,N,N]` board tensors to regular features, initializes equivariant register tokens from a learned seed plus `rule_mlp(rules)`, runs regular spatial GQA attention with canonical-frame RoPE, gathers board state into registers, broadcasts registers back to board features on configured blocks, and collapses the D4 axis only in heads. There is no dormant FiLM module in code; FiLM remains a future add-on if register seeding underdelivers. **Why:** this turns the SquareAccumulation reference and current design docs into a concrete, tested baseline while keeping rule conditioning simple. Source: [model.py](../Model/sakigo_model/model.py), [layers.py](../Model/sakigo_model/layers.py), [EquivariantAttention.md](../Design/Architecture/EquivariantAttention.md), [Model/README.md](../Model/README.md).
+
 ## D17 — Policy can be sharp; budget should stay smooth (2026-06-17, clarified)
 
 The policy head is liberated from being the search prior, so it may train toward a comparatively sharp "best move" / reward-preference target. The budget head remains the smooth action distribution that guides search allocation. **Why:** search needs graded probabilities so it does not prematurely starve plausible moves; the policy head is an auxiliary reward/ranking signal, so sharpness is less dangerous there. **Caveat:** sharp policy targets still affect the shared trunk and can amplify teacher noise, so keep loss weight / temperature / top-k shaping explicit. Source: human clarification, this session.
@@ -12,15 +24,15 @@ Leaning toward a Bayesian searcher: expand the leaf with the highest probability
 
 ## D13 — Stem: small group-equivariant CNN, regular representation (2026-06-17; equivariance scope corrected 2026-06-18)
 
-A small G-CNN (regular rep) as the stem. **Why:** bakes in Go's D4 board symmetry structurally instead of relying only on data augmentation. **Whole-net equivariance is the goal** (corrected 2026-06-18): stem, escnn trunk convs (D14), *and* the register-token attention are all meant to be equivariant — not a stem-only front-end prior. **Open:** regular rep multiplies channels by |G| (×8 for D4) — costly, hence "small"; confirm that beats plain symmetry augmentation. The hard part shifts to the trunk — keeping the register-token QKV attention (which reads *and writes* spatial tokens, D14) equivariance-preserving, since plain QKV is not equivariant (see [Issues.md](Issues.md)). Color-swap / komi / Boundary on non-square boards aren't spatial symmetries and don't apply. Source: [Stem.md](../Design/Architecture/Stem.md); human clarification 2026-06-18.
+A small G-CNN (regular rep) as the stem. **Why:** bakes in Go's D4 board symmetry structurally instead of relying only on data augmentation. **Whole-net equivariance is the goal** (corrected 2026-06-18, clarified 2026-07-03): stem, D4-equivariant spatial attention trunk (D14), and register-token attention are all meant to be equivariant — not a stem-only front-end prior. **Open:** regular rep multiplies channels by |G| (×8 for D4) — costly, hence "small"; confirm that beats plain symmetry augmentation. The hard part is keeping spatial attention and register-token QKV read/write equivariance-preserving, since arbitrary QKV/channel mixing is not equivariant (see [Issues.md](Issues.md)). Color-swap / komi / Boundary on non-square boards aren't spatial symmetries and don't apply. Source: [Stem.md](../Design/Architecture/Stem.md); human clarification 2026-06-18 and 2026-07-03.
 
-## D14 — Trunk: KataGo nested residual blocks (escnn-equivariant) + register-token attention (2026-06-17; equivariance noted 2026-06-18)
+## D14 — Trunk: equivariant spatial attention + register-token attention (2026-06-17; clarified 2026-07-03)
 
-Conv nested-bottleneck residual blocks (KataGo-style) built on **escnn-based equivariant convolutions**; no spatial self-attention yet; **register tokens** with QKV attention between registers and each spatial token. Registers **read and write** the spatial tokens (a bidirectional global-context exchange, not a read-only summary), and the attention is to be **designed equivariance-preserving** so the net stays equivariant end-to-end (D13). **Why:** registers are a cheap global-information pathway — O(N·R) vs O(N²) for full spatial attention — a principled alternative to KataGo's global pooling, and they double as the global-head summary (→ D15). FiLM injection sites live here. **Open:** an equivariant register attention with read+write injection is non-trivial (see [Issues.md](Issues.md)). **Update (2026-07-03):** a working reference implementation now exists in the owner's playground repo (`D:\stuff\Documents\SquareAccumulationK-Isolation`) — regular-rep fibers, group-axis-batched QKV, equivariance-tested, no escnn; see [Issues.md](Issues.md). Source: [Trunk.md](../Design/Architecture/Trunk.md); human clarification 2026-06-18.
+The trunk uses D4-equivariant spatial attention nested residual blocks plus register-token QKV attention. Registers **read and write** spatial tokens (a bidirectional global-context exchange, not a read-only summary), and both spatial attention and register attention are designed to preserve whole-net equivariance (D13). **Why:** spatial attention provides board reasoning directly, while registers provide a compact global pathway and become the native input for global heads (D15). Rule conditioning seeds register tokens by default; FiLM can be added later as an extra multiplicative conditioning path if needed. **Update (2026-07-03):** a working reference implementation now exists in the owner's playground repo (`D:\stuff\Documents\SquareAccumulationK-Isolation`) — regular-rep fibers, group-axis-batched QKV, canonical-frame RoPE, equivariance-tested, no escnn; see [Issues.md](Issues.md). Source: [Trunk.md](../Design/Architecture/Trunk.md); human clarification 2026-06-18 and 2026-07-03.
 
-## D15 — Heads: 1×1 conv (spatial) + attention pooling→MLP (global) (2026-06-17)
+## D15 — Heads: 1×1 conv (spatial) + register MLP (global) (2026-06-17; clarified 2026-07-03)
 
-Spatial heads = 1×1 convs; global heads = attention pooling then MLP. **Why:** matches the spatial/global split ([SpatialGlobalDistinction.md](../Design/Output/SpatialGlobalDistinction.md)); attention pooling pairs naturally with the trunk's register tokens (they can *be* the pooled global state). Source: [Heads.md](../Design/Architecture/Heads.md).
+Spatial heads = 1×1 convs; global heads = MLPs applied to register tokens. **Why:** matches the spatial/global split ([SpatialGlobalDistinction.md](../Design/Output/SpatialGlobalDistinction.md)); the register stream is already the global state, so a separate attention-pooling mechanism is unnecessary unless later evidence asks for it. Source: [Heads.md](../Design/Architecture/Heads.md).
 
 ## D12 — Harvest cutoff keyed on best-move visits, not total visits (2026-06-17, proposed)
 
@@ -28,7 +40,7 @@ Gate harvest on the most-visited child's count (best-move visits ≥ K), not nod
 
 ## D10 — Training is search-based self-play, distilling search into the prior (2026-06-17; scope clarified 2026-06-19)
 
-The net (student) learns to approximate the result and statistics of net+search (teacher). **Why:** search is the policy-improvement operator; distilling it back into the prior is the AlphaZero/KataGo self-improvement loop. "Statistics" = visit distribution → budget/policy prior; "result" = root value → winrate/score. **Clarification (2026-06-19, human):** this is the *self-play RL loop* — the "teacher" is the net's **own search over its self-play games**, with targets outcome-grounded by the game result z. It is **not** offline distillation from a fixed external teacher (the vibego setting); "distillation" here means distilling *search into the prior*, not learning from a separate stronger net. This re-scopes the vibego evidence in [Issues.md](Issues.md) — most of its distillation-specific cautions do not transfer. Source: [SearchBasedStudentTeacher.md](../Design/Train/SearchBasedStudentTeacher.md).
+The net (student) learns to approximate the result and statistics of net+search (teacher). **Why:** search is the policy-improvement operator; distilling it back into the prior is the AlphaZero/KataGo self-improvement loop. "Statistics" = visit distribution → budget/policy prior; "result" = root value → winrate/score. **Clarification (2026-06-19, human):** this is the *self-play RL loop* — the "teacher" is the net's **own search over its self-play games**, with targets outcome-grounded by the game result z. It is **not** offline distillation from a fixed external teacher (the vibego setting); "distillation" here means distilling *search into the prior*, not learning from a separate stronger net. This re-scopes the vibego evidence in [Issues.md](Issues.md) — most of its distillation-specific cautions do not transfer. **Current tension (2026-07-03):** [Target.md](../Design/Distillation/Target.md), `Distillation/` assets, and `Model/sakigo_model/adapters.py` now sketch a separate KataGo-teacher distillation/bootstrap path. Treat that as unresolved against this older self-play-only framing until the training plan is reconciled. Source: [SearchBasedStudentTeacher.md](../Design/Train/SearchBasedStudentTeacher.md), [Target.md](../Design/Distillation/Target.md).
 
 ## D11 — Subtree harvest: train interior tree nodes, not just the root (2026-06-17)
 
@@ -40,13 +52,13 @@ No history planes. Go is only fully Markovian given complete history, but the `N
 
 > **Seed (2026-06-17):** D1–D8 below were **captured from the existing `../Design/` notes**, not decided by the AI. They record the human's choices and stated rationale so the reasoning survives across sessions. (They share one date, so they read D1→D8; future entries go on top, newest first.)
 
-## D1 — Minimal board input: 4 planes
+## D1 — Minimal board input: 6 planes
 
-Boundary, MyStones, OpponentStones, NonTrivialIllegal. **Why:** "leave it to the model to figure it out" — avoid hand-engineered features. The Boundary plane also enables non-rectangular boards. Source: [BoardInput.md](../Design/Input/BoardInput.md).
+MyStones, OpponentStones, EmptyPositions, BoundaryCorner, BoundaryEdge, NonTrivialIllegal. **Why:** "leave it to the model to figure it out" — avoid hand-engineered features while making occupancy, board geometry, and non-trivial legality explicit. Boundary planes also enable non-rectangular boards. Source: [BoardInput.md](../Design/Input/BoardInput.md); human clarification 2026-07-03.
 
-## D2 — Rules conditioned via FiLM, not input planes
+## D2 — Rules condition registers by default; FiLM is an add-on
 
-Rule settings are one-hot encoded, concatenated, and passed through two MLPs per injection site to produce FiLM bias+scale in the trunk. **Why:** feeding every rule as a board plane is overhead and rarely sampled; one-hot keeps correlated rules from being double-counted. Source: [NonBoardInput.md](../Design/Input/NonBoardInput.md).
+Rule settings are one-hot encoded and concatenated with scalar komi/capture-difference inputs. The default conditioning path feeds this non-board vector through an MLP to initialize the register tokens; FiLM bias+scale injection remains an optional add-on if register seeding is not enough. **Why:** feeding every rule as a board plane is overhead and rarely sampled; one-hot keeps correlated rules from being double-counted, and registers are the native global state read by global heads. Source: [NonBoardInput.md](../Design/Input/NonBoardInput.md); human clarification 2026-07-03.
 
 ## D3 — Only a subset of rules, one-hot per correlated group
 
@@ -54,11 +66,11 @@ Scoring {Area, Area+AncientChinese, Territory, TerritoryWithSekiScore}, Ko {Simp
 
 ## D4 — Komi & captured stones as normalized scalars
 
-Two *retained* scalars in [−1, 1], divided by board **area** (matching the score head, D7; handicap folded into komi implicitly). **Why:** compact and board-size-agnostic; the prisoner count is needed for Territory scoring, so it stays. CapturedStones can exceed board area, but that overflow is deliberately left unhandled (rare, and harmless as a NN input). Source: [NonBoardInput.md](../Design/Input/NonBoardInput.md); human clarification 2026-06-18.
+Two *retained* scalars in [−1, 1], divided by board **area** (matching the score head, D7; handicap folded into komi implicitly). CapturedStones means `#opponent stones I captured - #my stones opponent captured`, also normalized by board area. **Why:** compact and board-size-agnostic; the prisoner count is needed for Territory scoring, so it stays. Source: [NonBoardInput.md](../Design/Input/NonBoardInput.md); human clarification 2026-06-18 and 2026-07-03.
 
 ## D5 — Policy and budget are separate targets
 
-Budget head = search prior; policy head = an extra reward signal predicting the best move (variants PolicyWinrate, PolicyScore). Passing is a separate global PassProb. **Why:** decouples "where to search" from "what is best," so each can be supervised independently. Source: [Policy+Budget.md](../Design/Output/Policy+Budget.md).
+Budget head = search prior; policy head = an extra reward signal predicting the best move (variants PolicyWinrate, PolicyScore). Pass is represented as one additional logit beside the n^2 board-move logits; board moves plus pass enter the same softmax. **Why:** decouples "where to search" from "what is best," while keeping pass normalized with the legal action distribution instead of as an isolated scalar. Loss construction is deferred to the training phase. Source: [Policy+Budget.md](../Design/Output/Policy+Budget.md); human clarification 2026-07-03.
 
 ## D6 — Win / Loss / Draw as a length-3 vector
 

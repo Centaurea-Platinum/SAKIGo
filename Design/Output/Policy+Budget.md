@@ -1,2 +1,3 @@
 Policy and budget are separate targets. Search prior is provided by budget head, policy acts as an additional reward signal that tries to predict the best move. A variety of policy heads, like PolicyWinrate and PolicyScore, can thus be denoted.
-Passing are handled by a separate global head with scalar output PassProb.
+Pass is represented as one extra logit appended to the n^2 board-move logits. Board moves and pass enter the same softmax.
+In training, illegal moves are not masked but treated as part of the loss. In inference, do a mask on illegal moves. This is not a test train mismatch, the model should learn to produce legal moves, the mask in inference should be regarded as a precaution.

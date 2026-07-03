@@ -1,3 +1,3 @@
-See [./Output]
-Spatial heads use some 1x1 convs.
-Global heads use attention pooling and then mlp.
+See [../Output]
+Spatial heads use 1x1 convs over board features.
+Global heads use MLPs over register tokens.

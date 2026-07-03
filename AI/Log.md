@@ -2,6 +2,26 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-03 - Examined KataGo analysis output contract
+
+- Read the bundled KataGo v1.16.5 README/config and the official Analysis Engine docs. The local smoke test reached TensorRT initialization on the RTX GPU but timed out while creating the timing cache before returning a JSON line; no KataGo process remained afterward, and the temporary `analysis_logs/` directory was removed.
+- Updated [Design/Distillation/Target.md](../Design/Distillation/Target.md): Phase 1 should request `includePolicy` and `includeOwnership`, use `policy`, `ownership`, and `rootInfo.raw*` where present, treat `moveInfos` as audit/high-visit data for Phase 1, and convert the bundled BLACK-perspective analysis output into SAKIGo current-player targets.
+- Added the missing KataGo analysis JSON importer to [Issues.md](Issues.md), including row-major board order, pass-last policy, illegal `-1` policy entries, and perspective conversion.
+
+## 2026-07-03 — Synced AI notes with code-bearing workspace
+
+- Re-read root, model, and engine READMEs; current design docs; Rust engine code; PyTorch model/adapters/specs/tests; and the active diffs. Updated [Context.md](Context.md) from "design-only" to the current repo shape: `Design/`, `Engine/`, `Model/`, and local `Distillation/` assets.
+- Added implemented decisions: the engine owns legality/history/encoding (D20); `Design/ModelSpecs.md` drives `model1` plus scalar controls (D19); and `SakiGoModel` implements register-seeded D4 attention with no FiLM branch (D18).
+- Updated [Issues.md](Issues.md): architecture is now implemented but unvalidated, while search, scoring/adjudication, exact KataGo teacher projection, training/distillation reconciliation, and inference illegal-move masking remain open.
+- Rewrote [Guide.md](Guide.md) to make AI-note maintenance an explicit duty after non-trivial work, not a separate task the human has to request.
+- Worktree maintenance: added ignore coverage for local KataGo downloads/engines/model weights so artifact directories do not masquerade as source.
+
+## 2026-07-03 — Reconciled model-design clarifications
+
+- Updated AI notes to match the owner's clarifications: board input is six planes; trunk is D4-equivariant spatial attention plus register-token attention; global heads are MLPs on registers; rule conditioning seeds registers by default, with FiLM reserved as an add-on; captured-stone difference is `(opponent stones I captured - my stones opponent captured) / board_area`; pass is one extra logit in the same softmax as the board moves.
+- Clarified in Issues that the SquareAccumulation register implementation uses equivariant regular-representation register features, not merely invariant registers; only collapsed global-head outputs are invariant.
+- Left search and training-loop issues as deferred/open rather than trying to settle loss construction or search spec here; the current worktree also updates the matching `Design/` files.
+
 ## 2026-07-03 — Synced findings from the SquareAccumulation playground
 
 - The owner's boardgame-AI repo (`D:\stuff\Documents\SquareAccumulationK-Isolation` — exact-solved n×n game, D4-equivariant attention model) doubles as a SAKIGo rehearsal ground; a 2026-07-02 session there produced SAKIGo-relevant results, now synced into these notes.

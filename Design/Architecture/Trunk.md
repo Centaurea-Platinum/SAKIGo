@@ -1,2 +1,2 @@
-The main body will be a equivariance attention based nested residual blocks like katago, with custom implementation.
-Register tokens will be used, qkv attention applied between register tokens and each spatial token.
+The trunk uses D4-equivariant spatial-attention in nested residual blocks plus register-token attention.
+Register tokens read from and write to spatial tokens. Both spatial attention and register attention must preserve whole-net D4 equivariance.
