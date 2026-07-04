@@ -64,32 +64,53 @@ class SakiGoModel(nn.Module):
             ]
         )
 
-        register_input = self.config.register_count * self.config.trunk_channels
+        register_input = self._register_input_channels()
         self.invariant = InvariantHead("mean")
         self.wdl_head = RegularPointwiseMLP(
-            (register_input, self.config.wdl_hidden, self.config.wdl_outputs)
+            self._head_channels(self.config.wdl_channels, register_input, self.config.wdl_hidden, self.config.wdl_outputs)
         )
         self.score_head = RegularPointwiseMLP(
-            (register_input, self.config.score_hidden, self.config.score_outputs)
+            self._head_channels(self.config.score_channels, register_input, self.config.score_hidden, self.config.score_outputs)
         )
         self.policy_pass_head = RegularPointwiseMLP(
-            (register_input, self.config.policy_pass_hidden, self.config.policy_pass_outputs)
+            self._head_channels(
+                self.config.policy_pass_channels,
+                register_input,
+                self.config.policy_pass_hidden,
+                self.config.policy_pass_outputs,
+            )
         )
         self.budget_pass_head = RegularPointwiseMLP(
-            (register_input, self.config.budget_pass_hidden, self.config.budget_pass_outputs)
+            self._head_channels(
+                self.config.budget_pass_channels,
+                register_input,
+                self.config.budget_pass_hidden,
+                self.config.budget_pass_outputs,
+            )
         )
         self.ownership_head = RegularPointwiseMLP(
-            (
+            self._head_channels(
+                self.config.ownership_channels,
                 self.config.trunk_channels,
                 self.config.ownership_hidden,
                 self.config.ownership_outputs,
             )
         )
         self.policy_head = RegularPointwiseMLP(
-            (self.config.trunk_channels, self.config.policy_hidden, self.config.policy_outputs)
+            self._head_channels(
+                self.config.policy_channels,
+                self.config.trunk_channels,
+                self.config.policy_hidden,
+                self.config.policy_outputs,
+            )
         )
         self.budget_head = RegularPointwiseMLP(
-            (self.config.trunk_channels, self.config.budget_hidden, self.config.budget_outputs)
+            self._head_channels(
+                self.config.budget_channels,
+                self.config.trunk_channels,
+                self.config.budget_hidden,
+                self.config.budget_outputs,
+            )
         )
 
     def _gather_blocks(self) -> set[int]:
@@ -99,6 +120,24 @@ class SakiGoModel(nn.Module):
             else set(self.config.gather_blocks)
         )
 
+    def _head_channels(
+        self,
+        channels: tuple[int, ...] | None,
+        input_channels: int,
+        hidden_channels: int,
+        output_channels: int,
+    ) -> tuple[int, ...]:
+        return channels or (input_channels, hidden_channels, output_channels)
+
+    def _register_input_channels(self) -> int:
+        register_input = self.config.register_count * self.config.trunk_channels
+        if (
+            self.config.expanded_channel is not None
+            and self.config.expanded_channel != self.config.trunk_channels
+        ):
+            raise ValueError("expanded_channel must equal trunk_channels")
+        return register_input
+
     def _validate_config(self) -> None:
         if self.config.architecture != "SakiGoModel":
             raise ValueError(f"SakiGoModel cannot build architecture {self.config.architecture!r}")
@@ -106,7 +145,7 @@ class SakiGoModel(nn.Module):
             raise ValueError("input_planes must match the first stem channel")
         if self.config.rule_dim != self.config.rule_mlp_channels[0]:
             raise ValueError("rule_dim must match the first rule MLP channel")
-        register_input = self.config.register_count * self.config.trunk_channels
+        register_input = self._register_input_channels()
         if self.config.rule_mlp_channels[-1] != register_input:
             raise ValueError("rule MLP output must equal register_count * trunk_channels")
         if self.config.stem_channels[-1] != self.config.trunk_channels:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 from contextlib import nullcontext
@@ -34,6 +35,7 @@ from Training.data import (  # noqa: E402
     TRAIN_SPLIT,
     VAL_SPLIT,
     BatchPrefetcher,
+    PinnedBatchKeeper,
     StreamingJsonlBuffer,
     augment_record_d4,
     batch_to_device,
@@ -66,6 +68,13 @@ def _progress_enabled(args: argparse.Namespace) -> bool:
     return sys.stdout.isatty()
 
 
+def _check_eval_batch(batch: dict[str, torch.Tensor]) -> None:
+    """Canary: a real batch always has nonzero board planes (boundary/empty planes are set).
+    An all-zero board means the input pipeline delivered corrupted data."""
+    if float(batch["board"].abs().sum()) == 0.0:
+        raise RuntimeError("eval batch canary tripped: all-zero board planes (input pipeline corruption)")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train SAKIGo from precomputed JSONL records.")
     parser.add_argument("--data", nargs="+", required=True, help="Training JSONL files.")
@@ -76,12 +85,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--lr-schedule",
+        default="warmup-cosine",
+        choices=("constant", "warmup-cosine"),
+        help="Learning-rate schedule. warmup-cosine linearly warms up then cosine decays.",
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=0,
+        help="Linear warmup steps. 0 derives this from --warmup-fraction.",
+    )
+    parser.add_argument(
+        "--warmup-fraction",
+        type=float,
+        default=0.03,
+        help="Warmup fraction of --steps when --warmup-steps is 0.",
+    )
+    parser.add_argument(
+        "--min-lr-ratio",
+        type=float,
+        default=0.1,
+        help="Final LR as a fraction of --lr for warmup-cosine.",
+    )
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--log-interval", type=int, default=25)
     parser.add_argument("--checkpoint-interval", type=int, default=100)
     parser.add_argument("--loss-eval-batches", type=int, default=4)
-    parser.add_argument("--early-eval-steps", default="1,2,4,8,16,32,64,128,256,512,1024")
+    parser.add_argument("--early-eval-steps", default="1,2,4,8,16,32,64,128,256,512,1024,2048")
     parser.add_argument("--model-spec", default="model1")
     parser.add_argument("--model-board-size", type=int, default=0)
     parser.add_argument("--run-dir", default="")
@@ -139,13 +172,104 @@ def _autocast(amp_dtype: torch.dtype | None):
     return torch.autocast("cuda", dtype=amp_dtype) if amp_dtype is not None else nullcontext()
 
 
+def _optimizer_param_groups(
+    model: torch.nn.Module,
+    weight_decay: float,
+) -> list[dict[str, object]]:
+    decay: list[torch.nn.Parameter] = []
+    no_decay: list[torch.nn.Parameter] = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        lower_name = name.lower()
+        if (
+            parameter.ndim < 2
+            or name.endswith(".bias")
+            or "norm" in lower_name
+            or name == "register_seed"
+        ):
+            no_decay.append(parameter)
+        else:
+            decay.append(parameter)
+    groups: list[dict[str, object]] = []
+    if decay:
+        groups.append({"params": decay, "weight_decay": weight_decay})
+    if no_decay:
+        groups.append({"params": no_decay, "weight_decay": 0.0})
+    if not groups:
+        raise ValueError("model has no trainable parameters")
+    return groups
+
+
 def _make_optimizer(model: torch.nn.Module, args: argparse.Namespace, device: torch.device) -> torch.optim.Optimizer:
-    kwargs: dict[str, object] = {"lr": args.lr, "weight_decay": args.weight_decay}
+    kwargs: dict[str, object] = {"lr": args.lr}
     if device.type == "cuda":
         kwargs["fused"] = True
         if args.cuda_graphs:
             kwargs["capturable"] = True
-    return torch.optim.AdamW(model.parameters(), **kwargs)
+    return torch.optim.AdamW(_optimizer_param_groups(model, args.weight_decay), **kwargs)
+
+
+def _effective_warmup_steps(args: argparse.Namespace) -> int:
+    if args.warmup_steps < 0:
+        raise ValueError("--warmup-steps must be non-negative")
+    if not 0.0 <= args.warmup_fraction < 1.0:
+        raise ValueError("--warmup-fraction must be in [0, 1)")
+    if args.warmup_steps > 0:
+        return min(args.warmup_steps, max(1, args.steps))
+    if args.warmup_fraction == 0.0:
+        return 0
+    return min(max(1, math.ceil(args.steps * args.warmup_fraction)), max(1, args.steps))
+
+
+def _make_scheduler(
+    optimizer: torch.optim.Optimizer,
+    args: argparse.Namespace,
+) -> torch.optim.lr_scheduler.LRScheduler | None:
+    if args.lr_schedule == "constant":
+        return None
+    if args.lr_schedule != "warmup-cosine":
+        raise ValueError(f"unknown lr schedule: {args.lr_schedule}")
+    if not 0.0 <= args.min_lr_ratio <= 1.0:
+        raise ValueError("--min-lr-ratio must be in [0, 1]")
+    if args.cuda_graphs:
+        raise ValueError("--cuda-graphs currently requires --lr-schedule constant")
+
+    total_steps = max(1, args.steps)
+    warmup_steps = _effective_warmup_steps(args)
+    decay_steps = max(1, total_steps - warmup_steps)
+
+    def lr_factor(epoch: int) -> float:
+        step_number = max(1, epoch + 1)
+        if warmup_steps > 0 and step_number <= warmup_steps:
+            return step_number / warmup_steps
+        progress = min(1.0, max(0.0, (step_number - warmup_steps) / decay_steps))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return args.min_lr_ratio + (1.0 - args.min_lr_ratio) * cosine
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
+
+
+def _restore_optimizer_state(
+    optimizer: torch.optim.Optimizer,
+    checkpoint: dict,
+) -> None:
+    try:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+    except ValueError as exc:
+        print(
+            "warning: optimizer state was not restored "
+            f"({exc}); continuing with a fresh optimizer",
+            flush=True,
+        )
+
+
+def _restore_scheduler_state(
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+    checkpoint: dict,
+) -> None:
+    if scheduler is not None and "scheduler" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler"])
 
 
 def _make_graphed_step(
@@ -182,6 +306,7 @@ def balanced_eval(
     accumulator = MetricAccumulator(loss_weights)
     for _ in range(max(1, batches)):
         batch = collate(sample_batch(groups_by_size, batch_size, rng, board_weights), device)
+        _check_eval_batch(batch)
         with _autocast(amp_dtype):
             output = model(batch["board"], batch["rules"])
             head_losses = compute_head_losses(output, batch)
@@ -210,6 +335,7 @@ def balanced_eval_streaming(
             stream.sample_batch(split, batch_size, rng, board_weights, advance=False),
             device,
         )
+        _check_eval_batch(batch)
         with _autocast(amp_dtype):
             output = model(batch["board"], batch["rules"])
             head_losses = compute_head_losses(output, batch)
@@ -347,8 +473,10 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
     loss_weights = _loss_weights(args)
     amp_dtype = _amp_dtype(args, device)
     optimizer = _make_optimizer(model, args, device)
+    scheduler = _make_scheduler(optimizer, args)
     if resume_checkpoint is not None:
-        optimizer.load_state_dict(resume_checkpoint["optimizer"])
+        _restore_optimizer_state(optimizer, resume_checkpoint)
+        _restore_scheduler_state(scheduler, resume_checkpoint)
         restore_rng_state(resume_checkpoint, train_rng, val_rng)
 
     run_dir = make_run_dir(args.run_dir, args.resume or None)
@@ -405,11 +533,14 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
         prefetcher = BatchPrefetcher(produce_train_batch, depth=args.prefetch_batches) if args.prefetch_batches > 0 else None
         checkpoint_lock = prefetcher.lock if prefetcher is not None else nullcontext()
         progress = ProgressBar(args.steps, start_step, args.batch_size, _progress_enabled(args))
+        keeper = PinnedBatchKeeper(device.type == "cuda")
+        logged_loss = float("nan")
         try:
             for step in range(start_step + 1, args.steps + 1):
                 model.train()
                 cpu_batch = prefetcher.next() if prefetcher is not None else produce_train_batch()
                 batch = batch_to_device(cpu_batch, device)
+                keeper.fence(cpu_batch)
                 if graphed_step is not None:
                     output, head_losses, loss = graphed_step.step(batch)
                 else:
@@ -422,7 +553,9 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
                         amp_dtype,
                     )
                 train_metrics.add_batch(output, batch, head_losses, loss)
-                progress.render(step, train_metrics.last_loss)
+                if scheduler is not None:
+                    scheduler.step()
+                progress.render(step, logged_loss)
 
                 should_checkpoint = (
                     step in early_eval_steps
@@ -437,7 +570,17 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
                 )
                 if should_checkpoint:
                     with checkpoint_lock:
-                        save_checkpoint(model, optimizer, run_dir, step, args, model_config, train_rng, val_rng)
+                        save_checkpoint(
+                            model,
+                            optimizer,
+                            run_dir,
+                            step,
+                            args,
+                            model_config,
+                            train_rng,
+                            val_rng,
+                            scheduler=scheduler,
+                        )
                 if should_log:
                     val_metrics = balanced_eval_streaming(
                         model,
@@ -456,6 +599,7 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
                         **prefixed("train", train_metrics.averages()),
                         **prefixed("val", val_metrics.averages()),
                     }
+                    logged_loss = float(row["train_loss"])
                     add_val_confusion(row, val_metrics)
                     append_metrics(metrics_path, row)
                     progress.clear()
@@ -463,6 +607,7 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
                     train_metrics.reset()
         finally:
             progress.clear()
+            keeper.release_all()
             if prefetcher is not None:
                 prefetcher.close()
 
@@ -499,8 +644,10 @@ def main(argv: list[str] | None = None) -> None:
     loss_weights = _loss_weights(args)
     amp_dtype = _amp_dtype(args, device)
     optimizer = _make_optimizer(model, args, device)
+    scheduler = _make_scheduler(optimizer, args)
     if resume_checkpoint is not None:
-        optimizer.load_state_dict(resume_checkpoint["optimizer"])
+        _restore_optimizer_state(optimizer, resume_checkpoint)
+        _restore_scheduler_state(scheduler, resume_checkpoint)
         restore_rng_state(resume_checkpoint, train_rng, val_rng)
 
     run_dir = make_run_dir(args.run_dir, args.resume or None)
@@ -534,11 +681,14 @@ def main(argv: list[str] | None = None) -> None:
     prefetcher = BatchPrefetcher(produce_train_batch, depth=args.prefetch_batches) if args.prefetch_batches > 0 else None
     checkpoint_lock = prefetcher.lock if prefetcher is not None else nullcontext()
     progress = ProgressBar(args.steps, start_step, args.batch_size, _progress_enabled(args))
+    keeper = PinnedBatchKeeper(device.type == "cuda")
+    logged_loss = float("nan")
     try:
         for step in range(start_step + 1, args.steps + 1):
             model.train()
             cpu_batch = prefetcher.next() if prefetcher is not None else produce_train_batch()
             batch = batch_to_device(cpu_batch, device)
+            keeper.fence(cpu_batch)
             if graphed_step is not None:
                 output, head_losses, loss = graphed_step.step(batch)
             else:
@@ -551,7 +701,9 @@ def main(argv: list[str] | None = None) -> None:
                     amp_dtype,
                 )
             train_metrics.add_batch(output, batch, head_losses, loss)
-            progress.render(step, train_metrics.last_loss)
+            if scheduler is not None:
+                scheduler.step()
+            progress.render(step, logged_loss)
 
             should_checkpoint = (
                 step in early_eval_steps
@@ -566,7 +718,17 @@ def main(argv: list[str] | None = None) -> None:
             )
             if should_checkpoint:
                 with checkpoint_lock:
-                    save_checkpoint(model, optimizer, run_dir, step, args, model_config, train_rng, val_rng)
+                    save_checkpoint(
+                        model,
+                        optimizer,
+                        run_dir,
+                        step,
+                        args,
+                        model_config,
+                        train_rng,
+                        val_rng,
+                        scheduler=scheduler,
+                    )
             if should_log:
                 val_metrics = balanced_eval(
                     model,
@@ -584,6 +746,7 @@ def main(argv: list[str] | None = None) -> None:
                     **prefixed("train", train_metrics.averages()),
                     **prefixed("val", val_metrics.averages()),
                 }
+                logged_loss = float(row["train_loss"])
                 add_val_confusion(row, val_metrics)
                 append_metrics(metrics_path, row)
                 progress.clear()
@@ -591,6 +754,7 @@ def main(argv: list[str] | None = None) -> None:
                 train_metrics.reset()
     finally:
         progress.clear()
+        keeper.release_all()
         if prefetcher is not None:
             prefetcher.close()
 

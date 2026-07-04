@@ -1,11 +1,11 @@
 """Sequential Phase 1 training suite: sweep batch size per spec, then train each spec.
 
-For every model spec (default: model1 and its two scalar controls) this script
+For every model spec (default: model1 and model2) this script
 1. benchmarks candidate batch sizes on real records (bf16, fused AdamW, grad clip),
 2. picks the highest-throughput batch that fits, and
 3. launches Training.train as a subprocess with an equal samples-seen budget
-   (--epochs over the train split), progress bar on, and D4 augmentation
-   enabled automatically for non-equivariant (ScalarSakiGoModel) specs.
+   (--epochs over the train split), progress bar on, and D4 augmentation enabled
+   automatically for non-equivariant specs.
 
 Example:
     uv run python -m Training.run_phase1_suite --data Training/data/katago_phase1_20260703_172838/samples.jsonl
@@ -35,9 +35,9 @@ from Training.checkpoints import model_from_config  # noqa: E402
 from Training.common import resolve_root_path, training_device  # noqa: E402
 from Training.data import build_groups, collate, record_from_json, sample_batch, scan_jsonl_stream_metadata  # noqa: E402
 from Training.losses import LossWeights  # noqa: E402
-from Training.train import _train_batch  # noqa: E402
+from Training.train import _make_optimizer, _train_batch  # noqa: E402
 
-DEFAULT_SPECS = "model1,model1_control_params,model1_control_compute"
+DEFAULT_SPECS = "model1,model2"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -45,6 +45,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--data", required=True, help="Phase 1 JSONL file.")
     parser.add_argument("--specs", default=DEFAULT_SPECS, help="Comma-separated model specs to train.")
     parser.add_argument("--epochs", type=float, default=1.0, help="Samples-seen budget in train-split epochs.")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=128,
+        help="Fixed batch size for every spec (a controlled variable across the A/B).",
+    )
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="Instead of the fixed batch size, pick the fastest per spec from --batch-candidates.",
+    )
     parser.add_argument("--batch-candidates", default="128,256,512,1024")
     parser.add_argument("--sweep-records", type=int, default=512, help="Records loaded for the benchmark sweep.")
     parser.add_argument("--sweep-steps", type=int, default=20, help="Timed steps per candidate (after 3 warmup).")
@@ -61,8 +72,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stream-buffer-mb", type=float, default=1024.0)
     parser.add_argument("--run-prefix", default="", help="Run dir prefix; default phase1_<timestamp>.")
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--lr-schedule",
+        default="warmup-cosine",
+        choices=("constant", "warmup-cosine"),
+        help="Learning-rate schedule forwarded to Training.train.",
+    )
+    parser.add_argument("--warmup-steps", type=int, default=0)
+    parser.add_argument("--warmup-fraction", type=float, default=0.03)
+    parser.add_argument("--min-lr-ratio", type=float, default=0.1)
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--checkpoint-interval", type=int, default=500)
+    parser.add_argument("--loss-eval-batches", type=int, default=4)
     return parser.parse_args(argv)
 
 
@@ -89,6 +111,8 @@ def benchmark_spec_batch(
     timed_steps: int,
     memory_budget: int,
     max_seconds: float,
+    lr: float,
+    weight_decay: float,
 ) -> tuple[float | None, int, str]:
     """Benchmark one (spec, batch size). Returns (samples/s or None, peak bytes, reason).
 
@@ -105,10 +129,8 @@ def benchmark_spec_batch(
         config = config_from_spec(spec, board_size=board_size)
         model = model_from_config(config).to(device)
         model.train()
-        kwargs: dict[str, object] = {"lr": 3e-4, "weight_decay": 1e-4}
-        if device.type == "cuda":
-            kwargs["fused"] = True
-        optimizer = torch.optim.AdamW(model.parameters(), **kwargs)
+        optimizer_args = argparse.Namespace(lr=lr, weight_decay=weight_decay, cuda_graphs=False)
+        optimizer = _make_optimizer(model, optimizer_args, device)
         loss_weights = LossWeights()
         batch = collate(sample_batch(groups, batch_size, rng), device)
         if device.type == "cuda":
@@ -176,9 +198,9 @@ def main(argv: list[str] | None = None) -> None:
     train_count = metadata.train_count or metadata.record_count
     print(f"records={metadata.record_count}  train={metadata.train_count}  val={metadata.val_count}")
 
-    sweep_records = load_sweep_records(data_path, args.sweep_records)
+    sweep_records = load_sweep_records(data_path, args.sweep_records) if args.sweep else []
     memory_budget = 0
-    if device.type == "cuda":
+    if args.sweep and device.type == "cuda":
         total_memory = torch.cuda.get_device_properties(device).total_memory
         memory_budget = int(total_memory * args.memory_fraction)
         print(f"memory budget: {memory_budget / 2**30:.1f} GiB of {total_memory / 2**30:.1f} GiB dedicated VRAM")
@@ -186,50 +208,54 @@ def main(argv: list[str] | None = None) -> None:
     for spec in specs:
         architecture = config_from_spec(spec).architecture
         augment = architecture != "SakiGoModel"
-        print(f"\n=== {spec} ({architecture}) batch sweep ===")
-        best_batch, best_rate = None, 0.0
-        previous: tuple[int, int] | None = None  # (batch, peak bytes)
-        for batch_size in candidates:
-            if previous is not None and memory_budget:
-                projected = previous[1] * batch_size / previous[0]
-                if projected > memory_budget:
+        best_batch, best_rate = args.batch_size, 0.0
+        if args.sweep:
+            print(f"\n=== {spec} ({architecture}) batch sweep ===")
+            best_batch = None
+            previous: tuple[int, int] | None = None  # (batch, peak bytes)
+            for batch_size in candidates:
+                if previous is not None and memory_budget:
+                    projected = previous[1] * batch_size / previous[0]
+                    if projected > memory_budget:
+                        print(
+                            f"  batch {batch_size:>5}: skipped "
+                            f"(projected {projected / 2**30:.1f} GiB > budget {memory_budget / 2**30:.1f} GiB)"
+                        )
+                        break
+                rate, peak, reason = benchmark_spec_batch(
+                    spec,
+                    sweep_records,
+                    batch_size,
+                    device,
+                    amp_dtype,
+                    args.sweep_steps,
+                    memory_budget,
+                    args.sweep_max_seconds,
+                    args.lr,
+                    args.weight_decay,
+                )
+                if reason == "oom":
+                    print(f"  batch {batch_size:>5}: OOM, skipping larger sizes")
+                    break
+                if reason == "over_budget":
                     print(
-                        f"  batch {batch_size:>5}: skipped "
-                        f"(projected {projected / 2**30:.1f} GiB > budget {memory_budget / 2**30:.1f} GiB)"
+                        f"  batch {batch_size:>5}: over memory budget "
+                        f"({peak / 2**30:.1f} GiB > {memory_budget / 2**30:.1f} GiB), skipping larger sizes"
                     )
                     break
-            rate, peak, reason = benchmark_spec_batch(
-                spec,
-                sweep_records,
-                batch_size,
-                device,
-                amp_dtype,
-                args.sweep_steps,
-                memory_budget,
-                args.sweep_max_seconds,
-            )
-            if reason == "oom":
-                print(f"  batch {batch_size:>5}: OOM, skipping larger sizes")
-                break
-            if reason == "over_budget":
-                print(
-                    f"  batch {batch_size:>5}: over memory budget "
-                    f"({peak / 2**30:.1f} GiB > {memory_budget / 2**30:.1f} GiB), skipping larger sizes"
-                )
-                break
-            previous = (batch_size, peak)
-            peak_text = f", peak {peak / 2**30:.1f} GiB" if peak else ""
-            if rate > best_rate:
-                best_batch, best_rate = batch_size, rate
-                print(f"  batch {batch_size:>5}: {rate:,.0f} samples/s{peak_text}  <- best")
-            elif rate < 0.97 * best_rate:
-                print(f"  batch {batch_size:>5}: {rate:,.0f} samples/s{peak_text}  (declining, stopping sweep)")
-                break
-            else:
-                print(f"  batch {batch_size:>5}: {rate:,.0f} samples/s{peak_text}")
-        if best_batch is None:
-            print(f"  no runnable batch size for {spec}; skipping")
-            continue
+                previous = (batch_size, peak)
+                peak_text = f", peak {peak / 2**30:.1f} GiB" if peak else ""
+                if rate > best_rate:
+                    best_batch, best_rate = batch_size, rate
+                    print(f"  batch {batch_size:>5}: {rate:,.0f} samples/s{peak_text}  <- best")
+                elif rate < 0.97 * best_rate:
+                    print(f"  batch {batch_size:>5}: {rate:,.0f} samples/s{peak_text}  (declining, stopping sweep)")
+                    break
+                else:
+                    print(f"  batch {batch_size:>5}: {rate:,.0f} samples/s{peak_text}")
+            if best_batch is None:
+                print(f"  no runnable batch size for {spec}; skipping")
+                continue
         steps = max(1, math.ceil(train_count * args.epochs / best_batch))
         plans.append(
             {
@@ -244,10 +270,10 @@ def main(argv: list[str] | None = None) -> None:
 
     print("\n=== Training plan ===")
     for plan in plans:
-        eta_minutes = plan["steps"] * plan["batch"] / plan["rate"] / 60.0
+        eta_text = f"  est {plan['steps'] * plan['batch'] / plan['rate'] / 60.0:,.0f} min" if plan["rate"] else ""
         print(
             f"  {plan['spec']:<24} batch={plan['batch']:<5} steps={plan['steps']:<6} "
-            f"augment_d4={plan['augment']}  est {eta_minutes:,.0f} min"
+            f"augment_d4={plan['augment']} schedule={args.lr_schedule}{eta_text}"
         )
 
     results = []
@@ -272,10 +298,22 @@ def main(argv: list[str] | None = None) -> None:
             str(args.seed),
             "--lr",
             str(args.lr),
+            "--weight-decay",
+            str(args.weight_decay),
+            "--lr-schedule",
+            args.lr_schedule,
+            "--warmup-steps",
+            str(args.warmup_steps),
+            "--warmup-fraction",
+            str(args.warmup_fraction),
+            "--min-lr-ratio",
+            str(args.min_lr_ratio),
             "--log-interval",
             str(args.log_interval),
             "--checkpoint-interval",
             str(args.checkpoint_interval),
+            "--loss-eval-batches",
+            str(args.loss_eval_batches),
             "--run-dir",
             str(plan["run_dir"]),
             "--progress",

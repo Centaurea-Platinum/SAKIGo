@@ -215,8 +215,33 @@ def scan_jsonl_stream_metadata(
     val_fraction: float,
     seed: int,
     boards: Iterable[int] | None = None,
+    use_cache: bool = True,
 ) -> JsonlStreamMetadata:
+    paths = list(paths)
     board_filter = set(boards) if boards is not None else None
+    cache_path: Path | None = None
+    cache_key: str | None = None
+    if use_cache and len(paths) == 1:
+        path = paths[0]
+        if not path.exists():
+            raise FileNotFoundError(f"missing data file: {path}")
+        stat = path.stat()
+        boards_key = ",".join(str(size) for size in sorted(board_filter)) if board_filter else "all"
+        cache_key = f"{stat.st_size}:{stat.st_mtime_ns}:{val_fraction}:{seed}:{boards_key}"
+        cache_path = path.with_name(path.name + ".scancache.json")
+        if cache_path.exists():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cached = {}
+            entry = cached.get(cache_key)
+            if entry is not None:
+                return JsonlStreamMetadata(
+                    record_count=int(entry["record_count"]),
+                    train_count=int(entry["train_count"]),
+                    val_count=int(entry["val_count"]),
+                    board_counts={int(size): int(count) for size, count in entry["board_counts"].items()},
+                )
     board_counts: dict[int, int] = {}
     record_count = 0
     train_count = 0
@@ -241,12 +266,28 @@ def scan_jsonl_stream_metadata(
                     train_count += 1
     if record_count == 0:
         raise ValueError("no streaming records found")
-    return JsonlStreamMetadata(
+    metadata = JsonlStreamMetadata(
         record_count=record_count,
         train_count=train_count,
         val_count=val_count,
         board_counts=board_counts,
     )
+    if cache_path is not None and cache_key is not None:
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+        except (OSError, ValueError):
+            cached = {}
+        cached[cache_key] = {
+            "record_count": metadata.record_count,
+            "train_count": metadata.train_count,
+            "val_count": metadata.val_count,
+            "board_counts": {str(size): count for size, count in metadata.board_counts.items()},
+        }
+        try:
+            cache_path.write_text(json.dumps(cached), encoding="utf-8")
+        except OSError:
+            pass
+    return metadata
 
 
 class StreamingJsonlBuffer:
@@ -278,6 +319,8 @@ class StreamingJsonlBuffer:
         self._path_index = 0
         self._handle = None
         self._line_number = 0
+        self._pending_entry: BufferedJsonlRecord | None = None
+        self._reader_at_eof = False
 
     def close(self) -> None:
         if self._handle is not None:
@@ -295,14 +338,20 @@ class StreamingJsonlBuffer:
             minimum_records = max(1, minimum_records)
             while len(self.entries) < minimum_records:
                 entry = self._read_next_accepted()
-                if self.entries and self.buffer_bytes + entry.byte_size > self.max_buffer_bytes:
+                if entry is None:
                     break
-                self._add_entry(entry)
+                if self.entries and self.buffer_bytes + entry.byte_size > self.max_buffer_bytes:
+                    self._pending_entry = entry
+                    break
+                self._add_entry(entry, allow_eviction=False)
             while True:
                 entry = self._read_next_accepted()
-                if self.buffer_bytes + entry.byte_size > self.max_buffer_bytes:
+                if entry is None:
                     break
-                self._add_entry(entry)
+                if self.buffer_bytes + entry.byte_size > self.max_buffer_bytes:
+                    self._pending_entry = entry
+                    break
+                self._add_entry(entry, allow_eviction=False)
             if not self.entries:
                 raise ValueError("streaming buffer could not load any records")
 
@@ -328,17 +377,24 @@ class StreamingJsonlBuffer:
             else:
                 weights = [board_weights.get(size, 1.0) for size in sizes]
                 board_size = rng.choices(sizes, weights=weights, k=1)[0]
-            pool = [entry for entry in self.entries if entry.split == split and entry.board_size == board_size]
-            records = [rng.choice(pool).record for _ in range(batch_size)]
             if advance:
-                for _ in range(batch_size):
-                    self._add_entry(self._read_next_accepted())
+                records = self._pop_batch_without_replacement(split, board_size, batch_size, rng)
+                self._refill_split(split, len(records))
+            else:
+                pool = [entry for entry in self.entries if entry.split == split and entry.board_size == board_size]
+                records = [rng.choice(pool).record for _ in range(batch_size)]
         return records
 
     def advance(self, accepted_records: int) -> None:
         with self.lock:
             for _ in range(max(0, accepted_records)):
-                self._add_entry(self._read_next_accepted())
+                entry = self._read_next_accepted()
+                if entry is None:
+                    self._reset_reader()
+                    entry = self._read_next_accepted()
+                if entry is None:
+                    raise ValueError("streaming buffer could not advance")
+                self._add_entry(entry)
 
     def stats(self) -> dict[str, int]:
         with self.lock:
@@ -350,24 +406,107 @@ class StreamingJsonlBuffer:
 
     def _ensure_split_available(self, split: str) -> None:
         while not any(entry.split == split for entry in self.entries):
-            self._add_entry(self._read_next_accepted())
+            if self._reader_at_eof:
+                self._reset_reader()
+            entry = self._read_next_accepted()
+            if entry is None:
+                self._reset_reader()
+                continue
+            self._add_entry(entry)
 
-    def _add_entry(self, entry: BufferedJsonlRecord) -> None:
+    def _add_entry(
+        self,
+        entry: BufferedJsonlRecord,
+        *,
+        allow_eviction: bool = True,
+        protected_split: str | None = None,
+    ) -> None:
         if entry.byte_size > self.max_buffer_bytes:
             raise ValueError(
                 "streaming buffer is too small to hold a single record; "
                 "increase --stream-buffer-mb"
             )
         while self.entries and self.buffer_bytes + entry.byte_size > self.max_buffer_bytes:
-            index = self._evict_rng.randrange(len(self.entries))
+            if not allow_eviction:
+                raise ValueError("streaming buffer is too small for the requested prime size")
+            candidates = [
+                index
+                for index, buffered in enumerate(self.entries)
+                if protected_split is None or buffered.split != protected_split
+            ]
+            if not candidates:
+                raise ValueError(
+                    "streaming buffer is too small to preserve without-replacement "
+                    f"sampling for split {protected_split}; increase --stream-buffer-mb"
+                )
+            index = self._evict_rng.choice(candidates)
             removed = self.entries.pop(index)
             self.buffer_bytes -= removed.byte_size
         self.entries.append(entry)
         self.buffer_bytes += entry.byte_size
 
-    def _read_next_accepted(self) -> BufferedJsonlRecord:
+    def _pop_batch_without_replacement(
+        self,
+        split: str,
+        board_size: int,
+        batch_size: int,
+        rng: random.Random,
+    ) -> list[TrainingRecord]:
+        records: list[TrainingRecord] = []
+        while len(records) < batch_size:
+            remaining = batch_size - len(records)
+            self._fill_until_pool(split, board_size, remaining)
+            pool_indices = [
+                index
+                for index, entry in enumerate(self.entries)
+                if entry.split == split and entry.board_size == board_size
+            ]
+            if not pool_indices:
+                if self._reader_at_eof:
+                    self._reset_reader()
+                    continue
+                raise ValueError(f"streaming buffer has no {split} records for board size {board_size}")
+            if len(pool_indices) < remaining and self._reader_at_eof:
+                selected_indices = pool_indices
+            else:
+                selected_indices = rng.sample(pool_indices, min(remaining, len(pool_indices)))
+            selected_entries = [self.entries[index] for index in selected_indices]
+            for index in sorted(selected_indices, reverse=True):
+                removed = self.entries.pop(index)
+                self.buffer_bytes -= removed.byte_size
+            records.extend(entry.record for entry in selected_entries)
+        return records
+
+    def _fill_until_pool(self, split: str, board_size: int, target_count: int) -> None:
+        while (
+            sum(1 for entry in self.entries if entry.split == split and entry.board_size == board_size)
+            < target_count
+            and not self._reader_at_eof
+        ):
+            entry = self._read_next_accepted(allowed_splits={split})
+            if entry is None:
+                break
+            self._add_entry(entry, protected_split=split)
+
+    def _refill_split(self, split: str, target_count: int) -> None:
+        added = 0
+        while added < target_count and not self._reader_at_eof:
+            entry = self._read_next_accepted(allowed_splits={split})
+            if entry is None:
+                break
+            self._add_entry(entry, protected_split=split)
+            added += 1
+
+    def _read_next_accepted(self, allowed_splits: set[str] | None = None) -> BufferedJsonlRecord | None:
+        if self._pending_entry is not None:
+            entry = self._pending_entry
+            self._pending_entry = None
+            if allowed_splits is None or entry.split in allowed_splits:
+                return entry
         while True:
             path, line_number, line = self._read_next_line()
+            if line is None:
+                return None
             stripped = line.strip()
             if not stripped:
                 continue
@@ -375,6 +514,8 @@ class StreamingJsonlBuffer:
             if record.board_size not in self.boards:
                 continue
             split = split_for_position(record.board_size, record.position_key, self.val_fraction, self.seed)
+            if allowed_splits is not None and split not in allowed_splits:
+                continue
             return BufferedJsonlRecord(
                 record=record,
                 byte_size=record.array_nbytes() + 256,
@@ -382,7 +523,16 @@ class StreamingJsonlBuffer:
                 split=split,
             )
 
-    def _read_next_line(self) -> tuple[Path, int, str]:
+    def _reset_reader(self) -> None:
+        self.close()
+        self._path_index = 0
+        self._line_number = 0
+        self._pending_entry = None
+        self._reader_at_eof = False
+
+    def _read_next_line(self) -> tuple[Path, int, str | None]:
+        if self._reader_at_eof:
+            return self.paths[self._path_index], self._line_number, None
         while True:
             if self._handle is None:
                 path = self.paths[self._path_index]
@@ -394,7 +544,10 @@ class StreamingJsonlBuffer:
                 return self.paths[self._path_index], self._line_number, line
             self._handle.close()
             self._handle = None
-            self._path_index = (self._path_index + 1) % len(self.paths)
+            if self._path_index + 1 >= len(self.paths):
+                self._reader_at_eof = True
+                return self.paths[self._path_index], self._line_number, None
+            self._path_index += 1
 
 
 def _d4_transform_planes(array: np.ndarray, transform: int) -> np.ndarray:
@@ -553,14 +706,49 @@ def collate_cpu(records: list[TrainingRecord], pin_memory: bool = False) -> dict
     return batch
 
 
-def batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
+def batch_to_device(
+    batch: dict[str, torch.Tensor],
+    device: torch.device,
+    non_blocking: bool = True,
+) -> dict[str, torch.Tensor]:
     if device.type == "cpu":
         return batch
-    return {key: value.to(device, non_blocking=True) for key, value in batch.items()}
+    return {key: value.to(device, non_blocking=non_blocking) for key, value in batch.items()}
 
 
 def collate(records: list[TrainingRecord], device: torch.device) -> dict[str, torch.Tensor]:
-    return batch_to_device(collate_cpu(records, pin_memory=device.type == "cuda"), device)
+    """Synchronous collate for eval and one-off use: unpinned memory, blocking copies.
+
+    Pinned + non_blocking staging is reserved for the training path, where
+    PinnedBatchKeeper fences the staging buffers' lifetime with CUDA events.
+    Freeing a pinned staging tensor while its async H2D copy is still queued
+    lets the caching host allocator recycle the block (e.g. for the prefetch
+    thread), which silently corrupts the copied batch.
+    """
+    return batch_to_device(collate_cpu(records, pin_memory=False), device, non_blocking=False)
+
+
+class PinnedBatchKeeper:
+    """Keeps pinned CPU batches alive until their async H2D copies have executed.
+
+    Call fence(cpu_batch) right after batch_to_device: it records a CUDA event
+    and holds the batch until the event reports completion.
+    """
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self._pending: list[tuple[torch.cuda.Event, dict[str, torch.Tensor]]] = []
+
+    def fence(self, cpu_batch: dict[str, torch.Tensor]) -> None:
+        if not self.enabled:
+            return
+        self._pending = [(event, batch) for event, batch in self._pending if not event.query()]
+        event = torch.cuda.Event()
+        event.record()
+        self._pending.append((event, cpu_batch))
+
+    def release_all(self) -> None:
+        self._pending.clear()
 
 
 class BatchPrefetcher:

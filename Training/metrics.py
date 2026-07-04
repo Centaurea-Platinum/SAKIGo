@@ -110,27 +110,24 @@ class ProgressBar:
 
 
 class MetricAccumulator:
+    """Accumulates metrics as device tensors; host sync happens only in averages()."""
+
     def __init__(self, loss_weights: LossWeights) -> None:
         self.loss_weights = loss_weights.as_dict()
         self.reset()
 
     def reset(self) -> None:
         self.steps = 0
-        self.loss_sum = 0.0
-        self.last_loss = float("nan")
-        self.head_loss_sums = {head: 0.0 for head in HEADS}
-        self.head_counts = {head: 0.0 for head in HEADS}
-        self.wdl_correct = 0.0
-        self.wdl_count = 0.0
+        self._device: torch.device | None = None
+        self._sums: dict[str, torch.Tensor] = {}
         self.confusion = torch.zeros((len(WDL_LABELS), len(WDL_LABELS)), dtype=torch.float64)
-        self.action_entropy_sums = {head: 0.0 for head in ACTION_HEADS}
-        self.action_excess_sums = {head: 0.0 for head in ACTION_HEADS}
-        self.action_illegal_sums = {head: 0.0 for head in ACTION_HEADS}
-        self.action_illegal_counts = {head: 0.0 for head in ACTION_HEADS}
-        self.score_abs_sum = 0.0
-        self.score_count = 0.0
-        self.ownership_sign_correct = 0.0
-        self.ownership_cell_count = 0.0
+
+    def _sum(self, key: str, value: torch.Tensor) -> None:
+        value = value.detach().to(torch.float64)
+        if key in self._sums:
+            self._sums[key] += value
+        else:
+            self._sums[key] = value.clone()
 
     def add_batch(
         self,
@@ -140,14 +137,14 @@ class MetricAccumulator:
         total_loss: torch.Tensor,
     ) -> None:
         self.steps += 1
-        loss_value = float(total_loss.detach().cpu())
-        self.loss_sum += loss_value
-        self.last_loss = loss_value
+        if self._device is None:
+            self._device = total_loss.device
+            self.confusion = self.confusion.to(self._device)
+        self._sum("loss", total_loss)
         for head in HEADS:
-            count = float(batch[f"{head}_mask"].sum().detach().cpu())
-            self.head_counts[head] += count
-            if count > 0.0:
-                self.head_loss_sums[head] += float(head_losses[head].detach().cpu()) * count
+            count = batch[f"{head}_mask"].sum()
+            self._sum(f"{head}_count", count)
+            self._sum(f"{head}_loss", head_losses[head].detach() * count)
         self._add_wdl(output, batch)
         for head in ACTION_HEADS:
             self._add_action(output, batch, head)
@@ -156,19 +153,17 @@ class MetricAccumulator:
 
     def _add_wdl(self, output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> None:
         mask = batch["wdl_mask"]
-        if not mask.any().item():
-            return
-        logits = output["wdl_logits"][mask].detach()
-        target = batch["wdl_target"][mask].detach()
-        true = target.argmax(dim=-1)
-        predicted = logits.argmax(dim=-1)
-        self.wdl_correct += float((predicted == true).float().sum().cpu())
-        self.wdl_count += float(true.numel())
+        weights = mask.to(torch.float64)
+        true = batch["wdl_target"].detach().argmax(dim=-1)
+        predicted = output["wdl_logits"].detach().argmax(dim=-1)
+        self._sum("wdl_correct", ((predicted == true).to(torch.float64) * weights).sum())
+        self._sum("wdl_total", weights.sum())
         encoded = true * len(WDL_LABELS) + predicted
         self.confusion += torch.bincount(
-            encoded.cpu(),
+            encoded,
+            weights=weights,
             minlength=len(WDL_LABELS) ** 2,
-        ).reshape(len(WDL_LABELS), len(WDL_LABELS)).to(dtype=torch.float64)
+        ).reshape(len(WDL_LABELS), len(WDL_LABELS))
 
     def _add_action(
         self,
@@ -177,70 +172,60 @@ class MetricAccumulator:
         head: str,
     ) -> None:
         mask = batch[f"{head}_mask"]
-        if not mask.any().item():
-            return
+        selected = mask.float()
         logits = output[f"{head}_logits"].detach()
         target = batch[f"{head}_target"].detach()
-        log_probs = F.log_softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits.float(), dim=-1)
         probabilities = log_probs.exp()
         per_ce = -(target * log_probs).sum(dim=-1)
         per_entropy = -(target * target.clamp_min(1e-12).log()).sum(dim=-1)
-        selected = mask.float()
-        self.action_entropy_sums[head] += float((per_entropy * selected).sum().cpu())
-        self.action_excess_sums[head] += float(((per_ce - per_entropy) * selected).sum().cpu())
+        self._sum(f"{head}_entropy", (per_entropy * selected).sum())
+        self._sum(f"{head}_excess", ((per_ce - per_entropy) * selected).sum())
 
-        legal_available = mask & batch["legal_mask_available"]
-        if legal_available.any().item():
-            illegal_mass = (probabilities * (~batch["legal_mask"]).float()).sum(dim=-1)
-            self.action_illegal_sums[head] += float(illegal_mass[legal_available].sum().cpu())
-            self.action_illegal_counts[head] += float(legal_available.sum().cpu())
+        legal_available = (mask & batch["legal_mask_available"]).float()
+        illegal_mass = (probabilities * (~batch["legal_mask"]).float()).sum(dim=-1)
+        self._sum(f"{head}_illegal", (illegal_mass * legal_available).sum())
+        self._sum(f"{head}_illegal_count", legal_available.sum())
 
     def _add_score(self, output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> None:
-        mask = batch["score_mask"]
-        if not mask.any().item():
-            return
+        mask = batch["score_mask"].float()
         error = (output["score"].detach().reshape_as(batch["score_target"]) - batch["score_target"]).abs()
-        self.score_abs_sum += float(error[mask].sum().cpu())
-        self.score_count += float(mask.sum().cpu())
+        self._sum("score_abs", (error.squeeze(1) * mask).sum())
+        self._sum("score_total", mask.sum())
 
     def _add_ownership(self, output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> None:
-        mask = batch["ownership_mask"]
-        if not mask.any().item():
-            return
-        predicted = output["ownership_logits"].detach()[mask] >= 0.0
-        target = batch["ownership_target"][mask] >= 0.0
-        self.ownership_sign_correct += float((predicted == target).float().sum().cpu())
-        self.ownership_cell_count += float(target.numel())
+        mask = batch["ownership_mask"].float()
+        predicted = output["ownership_logits"].detach() >= 0.0
+        target = batch["ownership_target"] >= 0.0
+        per_record = (predicted == target).float().sum(dim=-1)
+        self._sum("ownership_correct", (per_record * mask).sum())
+        self._sum("ownership_cells", mask.sum() * batch["ownership_target"].shape[-1])
 
     def averages(self) -> dict[str, float]:
+        sums = {key: float(value.cpu()) for key, value in self._sums.items()}
         out: dict[str, float] = {
-            "loss": self.loss_sum / self.steps if self.steps else _nan(),
+            "loss": sums.get("loss", _nan()) / self.steps if self.steps else _nan(),
         }
         for head in HEADS:
-            count = self.head_counts[head]
-            out[f"{head}_loss"] = self.head_loss_sums[head] / count if count else _nan()
+            count = sums.get(f"{head}_count", 0.0)
+            out[f"{head}_loss"] = sums.get(f"{head}_loss", 0.0) / count if count else _nan()
             out[f"{head}_target_count"] = count
-        out["wdl_acc"] = self.wdl_correct / self.wdl_count if self.wdl_count else _nan()
+        wdl_total = sums.get("wdl_total", 0.0)
+        out["wdl_acc"] = sums.get("wdl_correct", 0.0) / wdl_total if wdl_total else _nan()
         for head in ACTION_HEADS:
-            count = self.head_counts[head]
-            out[f"{head}_target_entropy"] = (
-                self.action_entropy_sums[head] / count if count else _nan()
-            )
-            out[f"{head}_excess_ce"] = (
-                self.action_excess_sums[head] / count if count else _nan()
-            )
-            illegal_count = self.action_illegal_counts[head]
+            count = sums.get(f"{head}_count", 0.0)
+            out[f"{head}_target_entropy"] = sums.get(f"{head}_entropy", 0.0) / count if count else _nan()
+            out[f"{head}_excess_ce"] = sums.get(f"{head}_excess", 0.0) / count if count else _nan()
+            illegal_count = sums.get(f"{head}_illegal_count", 0.0)
             out[f"{head}_illegal_mass"] = (
-                self.action_illegal_sums[head] / illegal_count if illegal_count else _nan()
+                sums.get(f"{head}_illegal", 0.0) / illegal_count if illegal_count else _nan()
             )
             out[f"{head}_illegal_target_count"] = illegal_count
-        out["score_mae"] = self.score_abs_sum / self.score_count if self.score_count else _nan()
-        out["ownership_sign_acc"] = (
-            self.ownership_sign_correct / self.ownership_cell_count
-            if self.ownership_cell_count
-            else _nan()
-        )
-        out["ownership_cell_count"] = self.ownership_cell_count
+        score_total = sums.get("score_total", 0.0)
+        out["score_mae"] = sums.get("score_abs", 0.0) / score_total if score_total else _nan()
+        cells = sums.get("ownership_cells", 0.0)
+        out["ownership_sign_acc"] = sums.get("ownership_correct", 0.0) / cells if cells else _nan()
+        out["ownership_cell_count"] = cells
         return out
 
 

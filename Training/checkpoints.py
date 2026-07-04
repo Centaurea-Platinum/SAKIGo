@@ -38,24 +38,25 @@ def save_checkpoint(
     model_config: SakiGoModelConfig,
     train_rng: random.Random,
     val_rng: random.Random,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
 ) -> Path:
     checkpoint_dir = run_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     path = checkpoint_dir / f"step_{step:06}.pt"
-    torch.save(
-        {
-            "step": step,
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "config": vars(args),
-            "model_config": asdict(model_config),
-            "python_rng_state": train_rng.getstate(),
-            "val_python_rng_state": val_rng.getstate(),
-            "torch_rng_state": torch.get_rng_state(),
-            "cuda_rng_state_all": _cuda_rng_state(),
-        },
-        path,
-    )
+    payload = {
+        "step": step,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "config": vars(args),
+        "model_config": asdict(model_config),
+        "python_rng_state": train_rng.getstate(),
+        "val_python_rng_state": val_rng.getstate(),
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_state_all": _cuda_rng_state(),
+    }
+    if scheduler is not None:
+        payload["scheduler"] = scheduler.state_dict()
+    torch.save(payload, path)
     return path
 
 
@@ -80,8 +81,8 @@ def restore_rng_state(checkpoint: dict[str, Any], train_rng: random.Random, val_
     if "val_python_rng_state" in checkpoint:
         val_rng.setstate(checkpoint["val_python_rng_state"])
     if "torch_rng_state" in checkpoint:
-        torch.set_rng_state(checkpoint["torch_rng_state"])
+        # torch.load(map_location=cuda) may have moved the saved ByteTensor to the GPU.
+        torch.set_rng_state(checkpoint["torch_rng_state"].cpu())
     cuda_state = checkpoint.get("cuda_rng_state_all")
     if cuda_state is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(cuda_state)
-
+        torch.cuda.set_rng_state_all([state.cpu() for state in cuda_state])

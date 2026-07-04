@@ -18,9 +18,9 @@ For the external KataGo-teacher bootstrap path, [Target.md](../Design/Distillati
 
 The Rust engine is the deterministic source of truth for board topology, captures, suicide, simple ko, positional superko, pass moves, capture accounting, history hashes, and model input encoding. The neural net still receives a lossy no-history projection, but `Engine/src/game.rs` keeps the state needed to compute legality, and `Engine/src/encoder.rs` emits the six board planes plus ten rule features from the side-to-move perspective. **Why:** search, training data generation, and inference masking should share one rule implementation instead of duplicating ko/capture/history logic in Python or in the model. Source: [Engine/README.md](../Engine/README.md), [Scope.md](../Design/Engine/Scope.md), [encoder.rs](../Engine/src/encoder.rs).
 
-## D19 - Model specs are data-backed and include scalar controls (2026-07-03, implemented)
+## D19 - Model specs are compact data-backed shapes (2026-07-03, updated 2026-07-04)
 
-`Design/ModelSpecs.md` is a JSON-compatible spec consumed by `Model/sakigo_model/specs.py`. It defines the main D4-equivariant `model1` plus two non-equivariant scalar controls: `model1_control_params` for approximate trainable-parameter matching and `model1_control_compute` for active scalar feature-width matching. **Why:** the project needs to test whether the D4 regular model wins because of symmetry structure, parameter count, or raw dense width. Source: [ModelSpecs.md](../Design/ModelSpecs.md), [Model/README.md](../Model/README.md), [scalar_model.py](../Model/sakigo_model/scalar_model.py).
+`Design/ModelSpecs/ModelSpecs.md` is a JSON-compatible spec consumed by `Model/sakigo_model/specs.py`. It defines the D4-equivariant `model1` and `model2` using descriptive architecture tags plus reusable stem/head shape files, with input/rule dimensions derived from the stem shape. **Why:** model sizing stays machine-readable without repeating head/stem structure or leaking implementation class names into the design spec. Source: [ModelSpecs.md](../Design/ModelSpecs/ModelSpecs.md), [StemShapes.md](../Design/ModelSpecs/StemShapes.md), [HeadShapes.md](../Design/ModelSpecs/HeadShapes.md), [Model/README.md](../Model/README.md).
 
 ## D18 - Model v1 uses register-seeded D4 attention with no FiLM branch (2026-07-03, implemented)
 

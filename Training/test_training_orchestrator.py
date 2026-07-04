@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import math
+import random
 from pathlib import Path
 
 import pytest
 import numpy as np
 import torch
 
+from Model.sakigo_model import config_from_spec
+from Training.checkpoints import model_from_config
 from Training.data import (
+    TRAIN_SPLIT,
+    StreamingJsonlBuffer,
     augment_record_d4,
     collate,
     load_records,
@@ -22,7 +28,7 @@ from Training.losses import (
     masked_soft_cross_entropy,
     weighted_total_loss,
 )
-from Training.train import main as train_main
+from Training.train import _make_optimizer, main as train_main
 from Training.generate_katago_phase1 import AREA as GO_AREA, BLACK, WHITE
 from Training.selfplay_eval import main as eval_main, tromp_taylor_score
 
@@ -251,6 +257,74 @@ def test_train_smoke_and_resume(tmp_path: Path) -> None:
     assert rows[-1]["val_policy_loss"]
 
 
+def test_train_only_logs_on_log_steps(tmp_path: Path) -> None:
+    data_path = tmp_path / "train.jsonl"
+    rows = [sample_record(f"p{index}") for index in range(4)]
+    write_jsonl(data_path, rows)
+    run_dir = tmp_path / "run"
+
+    train_main(
+        [
+            "--data",
+            str(data_path),
+            "--run-dir",
+            str(run_dir),
+            "--device",
+            "cpu",
+            "--model-board-size",
+            "3",
+            "--batch-size",
+            "2",
+            "--steps",
+            "3",
+            "--log-interval",
+            "100",
+            "--checkpoint-interval",
+            "100",
+            "--early-eval-steps",
+            "",
+            "--loss-eval-batches",
+            "1",
+            "--val-fraction",
+            "0.25",
+            "--seed",
+            "3",
+            "--prefetch-batches",
+            "0",
+        ]
+    )
+
+    with (run_dir / "metrics.csv").open("r", newline="", encoding="utf-8") as handle:
+        metrics_rows = list(csv.DictReader(handle))
+    assert [row["step"] for row in metrics_rows] == ["1", "3"]
+    assert metrics_rows[-1]["train_wdl_target_count"] == "4"
+
+
+def test_optimizer_excludes_offsets_norms_and_register_seed_from_weight_decay() -> None:
+    model = model_from_config(config_from_spec("model1", board_size=3))
+    optimizer = _make_optimizer(
+        model,
+        argparse.Namespace(lr=3e-4, weight_decay=1e-4, cuda_graphs=False),
+        torch.device("cpu"),
+    )
+
+    decay_ids = {id(parameter) for group in optimizer.param_groups if group["weight_decay"] for parameter in group["params"]}
+    no_decay_ids = {
+        id(parameter)
+        for group in optimizer.param_groups
+        if not group["weight_decay"]
+        for parameter in group["params"]
+    }
+    params_by_name = dict(model.named_parameters())
+
+    assert id(params_by_name["register_seed"]) in no_decay_ids
+    assert any(parameter_id in decay_ids for parameter_id in (id(parameter) for parameter in params_by_name.values()))
+    for name, parameter in params_by_name.items():
+        if name.endswith(".bias") or "norm" in name.lower():
+            assert id(parameter) in no_decay_ids
+            assert id(parameter) not in decay_ids
+
+
 def test_streaming_train_smoke(tmp_path: Path) -> None:
     data_path = tmp_path / "stream.jsonl"
     rows = [sample_record(f"p{index}") for index in range(24)]
@@ -300,3 +374,30 @@ def test_streaming_train_smoke(tmp_path: Path) -> None:
     with (run_dir / "metrics.csv").open("r", newline="", encoding="utf-8") as handle:
         metrics_rows = list(csv.DictReader(handle))
     assert [row["step"] for row in metrics_rows] == ["1", "2"]
+
+
+def test_streaming_train_buffer_samples_without_replacement(tmp_path: Path) -> None:
+    data_path = tmp_path / "stream_unique.jsonl"
+    rows = [sample_record(f"p{index}") for index in range(10)]
+    write_jsonl(data_path, rows)
+
+    first_record = record_from_json(rows[0])
+    record_bytes = first_record.array_nbytes() + 256
+    metadata = scan_jsonl_stream_metadata([data_path], val_fraction=0.0, seed=7)
+
+    with StreamingJsonlBuffer(
+        paths=[data_path],
+        boards=[3],
+        val_fraction=0.0,
+        seed=7,
+        max_buffer_bytes=record_bytes * 4,
+        metadata=metadata,
+    ) as stream:
+        stream.prime(minimum_records=2)
+        rng = random.Random(123)
+        seen: list[str] = []
+        for _ in range(5):
+            seen.extend(record.position_key for record in stream.sample_batch(TRAIN_SPLIT, 2, rng))
+
+    assert len(seen) == 10
+    assert sorted(seen) == [f"p{index}" for index in range(10)]

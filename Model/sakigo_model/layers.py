@@ -63,13 +63,18 @@ class RegularLinear1x1(nn.Module):
         return self.weight[:, :, rel]
 
     def _flat_weight_bias(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor | None]:
+        cacheable = (
+            not torch.is_grad_enabled()
+            and not self.weight.requires_grad
+            and (self.bias is None or not self.bias.requires_grad)
+        )
         cache_key = (
             *_device_key(device),
             self.weight.dtype,
             self.weight._version,
             self.bias._version if self.bias is not None else None,
         )
-        if torch.is_grad_enabled() or self._flat_cache_key != cache_key or self._flat_cache is None:
+        if not cacheable or self._flat_cache_key != cache_key or self._flat_cache is None:
             kernel = self._kernel(device)
             out_channels, in_channels = kernel.shape[:2]
             weight = kernel.permute(0, 2, 1, 3).reshape(
@@ -81,7 +86,7 @@ class RegularLinear1x1(nn.Module):
                 bias = self.bias.view(out_channels, 1).expand(out_channels, GROUP_SIZE).reshape(
                     out_channels * GROUP_SIZE,
                 )
-            if torch.is_grad_enabled():
+            if not cacheable:
                 return weight, bias
             self._flat_cache_key = cache_key
             self._flat_cache = (weight, bias)

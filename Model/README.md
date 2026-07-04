@@ -2,21 +2,20 @@
 
 This folder contains the first PyTorch model implementation for SAKIGo. It is intentionally model-only: game rules, search, training losses, data generation, and action masking are separate phases.
 
-The package lives in `Model/sakigo_model/`, and model sizes are selected from `Design/ModelSpecs.md`.
+The package lives in `Model/sakigo_model/`, and model sizes are selected from `Design/ModelSpecs/ModelSpecs.md`.
 
 ## Goals
 
-- Use the same forward API for all model variants: `forward(board, rules)`.
+- Use the same forward API for all model specs: `forward(board, rules)`.
 - Keep the main model D4-equivariant across board rotations/reflections.
 - Condition on rules through register initialization by default.
 - Keep policy and pass as a single action distribution shape, `N*N + 1`.
-- Provide scalar control groups that can test whether gains come from symmetry structure, parameter count, or raw compute width.
 - Support CUDA-friendly inference, including bf16 and CUDA graph replay for fixed shapes.
 
 ## Public API
 
 ```python
-from sakigo_model import SakiGoModel, ScalarSakiGoModel, model_from_spec
+from sakigo_model import SakiGoModel, model_from_spec
 
 model = model_from_spec("model1")
 outputs = model(board, rules)
@@ -82,39 +81,15 @@ Spatial heads run on board features:
 
 Policy and budget concatenate board logits with their pass logit, producing one `[B, N*N + 1]` tensor each. Training can apply one softmax across that full action vector.
 
-## Scalar Control Groups
-
-Two scalar controls are implemented as `ScalarSakiGoModel`. They use the same public API, register schedule, RoPE style, heads, and output shapes, but remove the D4 regular axis and equivariant weight sharing.
-
-The original idea of "collapse each regular representation into one scalar channel" is useful as a tiny ablation, but it is not parameter-matched here. A regular linear map has 8 relative-group kernel weights per input/output regular-channel pair. Collapsing one regular channel to one scalar channel would therefore make the scalar control much smaller.
-
-The implemented controls are:
-
-- `model1_control_params`: approximately trainable-parameter matched.
-  - Uses roughly `sqrt(8)` scalar width per regular channel.
-  - Current counts: `226,599` trainable parameters vs `208,486` for `model1`.
-
-- `model1_control_compute`: active scalar feature-width matched.
-  - Uses 8 scalar channels per regular channel.
-  - Example: trunk width `32` regular channels becomes `256` scalar channels.
-  - This is much larger in trainable parameters, but it is the closest simple control for comparing against the dense scalar width touched by the current regular implementation.
-
-These two controls answer different questions:
-
-- Parameter control: is the regular model better because of symmetry bias rather than parameter count?
-- Compute-width control: is the regular model better than spending comparable dense scalar width without symmetry structure?
-
 ## Important Files
 
 - `config.py`: dataclass configuration shared by model variants.
-- `specs.py`: loader and factory for `Design/ModelSpecs.md`.
+- `specs.py`: loader and factory for `Design/ModelSpecs/ModelSpecs.md`.
 - `d4.py`: D4 group tables and tensor transforms.
 - `layers.py`: regular-representation layers and trunk blocks.
 - `model.py`: D4-equivariant `SakiGoModel`.
-- `scalar_layers.py`: non-equivariant scalar control layers.
-- `scalar_model.py`: scalar control model.
 - `inference.py`: frozen inference helper with dtype/device movement and CUDA graph replay.
-- `test_sakigo_model.py`: equivariance, spec, shape, CUDA, and control tests.
+- `test_sakigo_model.py`: equivariance, spec, shape, and CUDA tests.
 
 ## Verification
 

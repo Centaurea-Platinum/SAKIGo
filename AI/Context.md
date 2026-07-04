@@ -21,11 +21,11 @@ Search, final scoring, end-of-game adjudication, self-play, and exact KataGo tea
 
 - [Engine/README.md](../Engine/README.md) - Rust rules/encoding engine. Owns board topology, captures, suicide, simple ko, positional superko, pass moves, history hashes, capture accounting, and feature encoding.
 - [Model/README.md](../Model/README.md) - PyTorch model package. Public API is `forward(board, rules)`, with outputs `wdl_logits`, `score`, `ownership_logits`, `policy_logits`, and `budget_logits`.
-- [Design/ModelSpecs.md](../Design/ModelSpecs.md) - JSON-compatible model specs consumed by `Model/sakigo_model/specs.py`. Defines `model1`, `model1_control_params`, and `model1_control_compute`.
+- [Design/ModelSpecs/ModelSpecs.md](../Design/ModelSpecs/ModelSpecs.md) - JSON-compatible model specs consumed by `Model/sakigo_model/specs.py`. Defines `model1` and `model2` with reusable stem/head shape files.
 - [Model/sakigo_model/adapters.py](../Model/sakigo_model/adapters.py) - canonical game-state projections for SAKIGo and KataGo distillation scaffolding.
 - [Training/generate_katago_phase1.py](../Training/generate_katago_phase1.py) - KataGo Phase 1 data generator. Keeps concurrent games/positions in flight, writes schema-v1 JSONL records, and maps KataGo analysis output into SAKIGo heads.
 - [Training/train.py](../Training/train.py) - JSONL trainer for the current five heads. Default mode still eager-loads records for small runs; pass `--stream-buffer-mb N` for the bounded-memory streaming path (decode-at-insert numpy records). Defaults include bf16 autocast on CUDA, fused AdamW, and a 2-deep background batch prefetcher; `--cuda-graphs` opts into full-step graph capture (single board size, fixed batch); `--augment-d4` applies random board symmetries for non-equivariant models; `--progress` renders a terminal progress bar.
-- [Training/run_phase1_suite.py](../Training/run_phase1_suite.py) - sequential Phase 1 suite: sweeps batch size per model spec, then trains `model1` and both scalar controls with equal samples-seen budgets, auto-enabling D4 augmentation for the controls.
+- [Training/run_phase1_suite.py](../Training/run_phase1_suite.py) - sequential Phase 1 suite: sweeps batch size per model spec, then trains the selected specs with equal samples-seen budgets.
 - [Training/selfplay_eval.py](../Training/selfplay_eval.py) - paired color-reversed evaluation matches between checkpoint raw-policy players (or the random baseline), with Tromp-Taylor adjudication, Elo + Wilson CI, and JSONL/SGF game dumps. Reuses the generator's rules/encoding.
 - [pyproject.toml](../pyproject.toml) - Python environment; pinned to Python 3.12 and CUDA PyTorch `2.11.0+cu128`.
 
@@ -81,4 +81,3 @@ Keep the AI notes current without waiting to be prompted: when code, design docs
 - **Budget head** - predicts per-move search allocation / search prior, distinct from the policy head.
 - **Regular representation** - D4 feature layout with one component for each of the 8 board symmetries.
 - **Register tokens** - global tokens shaped as regular features in the main model; they are equivariant, not merely invariant.
-- **Scalar controls** - non-equivariant `ScalarSakiGoModel` variants used to separate symmetry benefits from parameter count or dense compute width.

@@ -308,6 +308,18 @@ def test_regular_layers_are_equivariant() -> None:
     )
 
 
+def test_trainable_regular_linear_eval_does_not_reuse_stale_flat_cache() -> None:
+    module = RegularLinear1x1(1, 1, bias=False).eval()
+    x = torch.ones(1, 1, GROUP_SIZE, 1, 1)
+
+    with torch.no_grad():
+        first = module(x).clone()
+        module.weight.data.add_(1.0)
+        second = module(x)
+
+    assert not torch.allclose(first, second)
+
+
 def test_spatial_attention_with_rope_is_equivariant() -> None:
     module = RegularGQAAttention(
         channels=8,
@@ -464,42 +476,28 @@ def test_model_rejects_bad_inputs() -> None:
 def test_model_specs_build_expected_config() -> None:
     assert model_spec_names() == (
         "model1",
-        "model1_control_params",
-        "model1_control_compute",
+        "model2",
     )
     config = config_from_spec("model1")
     assert config.board_size == 32
     assert config.input_planes == 6
     assert config.rule_dim == 10
     assert config.trunk_channels == 32
-    assert config.rule_mlp_channels == (10, 32, 64)
+    assert config.expanded_channel == 32
+    assert config.bottleneck_channels == 16
+    assert config.head_dim == 8
+    assert config.rule_mlp_channels == (10, 32, 64, 64)
+    assert config.wdl_channels == (64, 64, 8, 3)
+    assert config.policy_channels == (32, 32, 8, 1)
+    assert config.policy_pass_channels == (64, 64, 8, 1)
     assert config.policy_pass_outputs == 1
-
-
-def test_scalar_control_specs_build_models() -> None:
-    params_config = config_from_spec("model1_control_params")
-    compute_config = config_from_spec("model1_control_compute")
-    assert params_config.architecture == "ScalarSakiGoModel"
-    assert compute_config.architecture == "ScalarSakiGoModel"
-    assert params_config.trunk_channels == 91
-    assert compute_config.trunk_channels == 8 * config_from_spec("model1").trunk_channels
-    assert compute_config.bottleneck_channels == 8 * config_from_spec("model1").bottleneck_channels
+    model2 = config_from_spec("model2")
+    assert model2.trunk_channels == 128
+    assert model2.expanded_channel == 128
+    assert model2.bottleneck_channels == 64
+    assert model2.head_dim == 16
     assert isinstance(model_from_spec("model1"), SakiGoModel)
-    assert isinstance(model_from_spec("model1_control_params"), ScalarSakiGoModel)
     assert ScalarSakiGoModel().config.architecture == "ScalarSakiGoModel"
-
-
-def test_scalar_control_specs_forward() -> None:
-    board, rules = random_inputs(batch=1, size=3)
-    for name in ("model1_control_params", "model1_control_compute"):
-        model = model_from_spec(name).eval()
-        with torch.no_grad():
-            output = model(board, rules)
-        assert output["wdl_logits"].shape == (1, 3)
-        assert output["score"].shape == (1, 1)
-        assert output["ownership_logits"].shape == (1, 9)
-        assert output["policy_logits"].shape == (1, 10)
-        assert output["budget_logits"].shape == (1, 10)
 
 
 def test_scalar_control_forward_shapes() -> None:
@@ -534,22 +532,6 @@ def test_scalar_control_forward_shapes() -> None:
     assert output["policy_logits"].shape == (2, 26)
     assert output["budget_logits"].shape == (2, 26)
     assert all(torch.isfinite(value).all().item() for value in output.values())
-
-
-def test_control_parameter_profile_is_intentional() -> None:
-    equivariant = model_from_spec("model1")
-    params_control = model_from_spec("model1_control_params")
-    compute_control = model_from_spec("model1_control_compute")
-
-    def count(model: torch.nn.Module) -> int:
-        return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-
-    equivariant_count = count(equivariant)
-    params_ratio = count(params_control) / equivariant_count
-    compute_ratio = count(compute_control) / equivariant_count
-    assert 0.75 <= params_ratio <= 1.25
-    assert compute_ratio > params_ratio
-
 
 def test_invalid_config_dimension_guards() -> None:
     with pytest.raises(ValueError, match="head_dim"):
