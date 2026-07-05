@@ -42,6 +42,7 @@ from Training.generate_katago_phase1 import (
     DEFAULT_KOMIS,
     DEFAULT_RULESETS,
     DEFAULT_SAMPLES_PER_COMBINATION,
+    GenerationProgressBar,
     GenerationSchedule,
     build_generation_plan,
     find_katago_path,
@@ -164,6 +165,27 @@ def test_katago_engine_lookup_prefers_host_executable_name(tmp_path: Path) -> No
     assert katago_executable_names("linux")[0] == "katago"
     assert find_katago_path(engine_root, "win32") == windows_engine / "katago.exe"
     assert find_katago_path(engine_root, "linux") == linux_engine / "katago"
+
+
+def test_generation_progress_bar_renders_colored_visit_progress(capsys: pytest.CaptureFixture[str]) -> None:
+    bar = GenerationProgressBar(100, enabled=True, width=10, color=True)
+    bar.render(
+        samples=25,
+        samples_per_second=5.0,
+        eta_seconds=15.0,
+        completed_combinations=2,
+        combination_count=4,
+        force=True,
+    )
+
+    rendered = capsys.readouterr().out
+    assert "\r" in rendered
+    assert "25/100 visits" in rendered
+    assert "5.0/s" in rendered
+    assert "combos 2/4" in rendered
+    assert "\033[" in rendered
+
+    bar.clear()
 
 
 def test_record_validation_rejects_bad_lengths_and_missing_targets() -> None:
