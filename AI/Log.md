@@ -2,6 +2,13 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-06 - Rebuild improvements: suicide semantics, eager path removed, PyO3 parked
+
+- Owner asked to implement the proposed improvements and was away; proceeded autonomously in stages.
+- Engine now implements KataGo `multiStoneSuicideLegal` semantics: single-stone suicide is always illegal even under `SuicideRule::Allowed` — resolving the tracked engine/generator divergence with zero data change (generator already behaved this way). Tests updated + new `single_stone_suicide_is_always_illegal`; 17 cargo tests.
+- Removed the deprecated eager training path: `train.py` is streaming-only (`--stream-buffer-mb` must be > 0), dead `balanced_eval`/`balanced_eval_streaming` deleted; the old eager smoke tests now exercise the streaming path. 52 pytest green. Eager record utilities in `data.py` remain (suite sweep + tests use them).
+- PyO3 engine binding attempted and **parked**: crates mirror unreachable, and an optional `pyo3` dependency breaks offline `cargo test` (lock resolution). Binding code parked uncompiled at [python.rs](../Engine/src/python.rs); full activation checklist in Issues. No speculative Python glue landed — it cannot be exercised until the wheel builds.
+
 ## 2026-07-06 - Layered hashes; crash-safe infra; loop dedup
 
 - Verified hash semantics against KataGo source: repetition hash is rule-defined (positional superko = board only; captures would break superko since every cycle increases them); metadata belongs in a separate situation hash. Engine now has incremental 128-bit Zobrist `PositionHash` + metadata-aware `StateHash` (to-move, simple-ko, captures, rules/komi) via `GameState::state_hash()`. 16 engine tests.

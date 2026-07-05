@@ -9,3 +9,6 @@ name = "sakigo_engine"
 path = "src/lib.rs"
 
 [dependencies]
+# PyO3 binding is parked in src/python.rs: declaring `pyo3` as an optional
+# dependency breaks offline builds (lock resolution needs the registry), and
+# the crates mirror is currently unreachable. See AI/Issues.md.
