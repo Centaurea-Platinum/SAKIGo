@@ -5,6 +5,7 @@ import json
 import math
 import random
 import sys
+from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
@@ -34,17 +35,20 @@ from Training.common import (  # noqa: E402
 from Training.data import (  # noqa: E402
     TRAIN_SPLIT,
     VAL_SPLIT,
-    BatchPrefetcher,
     PinnedBatchKeeper,
+    RulesetAwareBatchDataset,
+    StreamingRulesetAwareBatchDataset,
     StreamingJsonlBuffer,
-    augment_record_d4,
     batch_to_device,
     build_ruleset_groups,
     collate,
-    collate_cpu,
+    data_format_label,
+    expand_data_paths,
     filter_records_by_boards,
     infer_board_sizes,
+    is_legacy_jsonl_path,
     load_records,
+    make_batch_dataloader,
     sample_ruleset_aware_batch,
     scan_jsonl_stream_metadata,
     split_records,
@@ -123,8 +127,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--stream-buffer-mb",
         type=float,
-        default=0.0,
-        help="Use streaming JSONL mode with this many MiB of decoded-record buffer. 0 keeps eager loading.",
+        default=1024.0,
+        help=(
+            "Decoded-record streaming buffer in MiB. Defaults to 1024. "
+            "Set 0 to use deprecated eager loading of legacy single JSONL files."
+        ),
     )
     parser.add_argument(
         "--amp",
@@ -136,7 +143,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--prefetch-batches",
         type=int,
         default=2,
-        help="CPU batches assembled ahead on a background thread. 0 disables prefetching.",
+        help="Deprecated; DataLoader-backed streaming currently uses num_workers=0.",
     )
     parser.add_argument(
         "--cuda-graphs",
@@ -344,6 +351,29 @@ def balanced_eval_streaming(
     return accumulator
 
 
+@torch.no_grad()
+def balanced_eval_loader(
+    model: torch.nn.Module,
+    loader_iter: Iterator[dict[str, torch.Tensor]],
+    device: torch.device,
+    batches: int,
+    loss_weights: LossWeights,
+    amp_dtype: torch.dtype | None = None,
+) -> MetricAccumulator:
+    model.eval()
+    accumulator = MetricAccumulator(loss_weights)
+    for _ in range(max(1, batches)):
+        cpu_batch = next(loader_iter)
+        batch = batch_to_device(cpu_batch, device, non_blocking=False)
+        _check_eval_batch(batch)
+        with _autocast(amp_dtype):
+            output = model(batch["board"], batch["rules"])
+            head_losses = compute_head_losses(output, batch)
+            total_loss = weighted_total_loss(head_losses, loss_weights)
+        accumulator.add_batch(output, batch, head_losses, total_loss)
+    return accumulator
+
+
 def _train_batch(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -438,12 +468,23 @@ def _write_run_config(
 def _stream_buffer_bytes(args: argparse.Namespace) -> int:
     if args.stream_buffer_mb < 0.0:
         raise ValueError("--stream-buffer-mb must be non-negative")
+    if args.prefetch_batches < 0:
+        raise ValueError("--prefetch-batches must be non-negative")
     if args.stream_buffer_mb == 0.0:
         return 0
     byte_count = int(args.stream_buffer_mb * 1024 * 1024)
     if byte_count <= 0:
         raise ValueError("--stream-buffer-mb is too small")
     return byte_count
+
+
+def _warn_deprecated_legacy_jsonl(data_paths: list[Path]) -> None:
+    if any(is_legacy_jsonl_path(path) for path in data_paths):
+        print(
+            "warning: plain .jsonl training data is deprecated; prefer numbered .jsonl.zst shards",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
@@ -507,6 +548,8 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
             model_config,
             extra_config={
                 "data_loading": "streaming",
+                "data_pipeline": "torch_dataloader",
+                "data_format": data_format_label(data_paths),
                 "stream_train_split": train_split,
                 "stream_val_split": val_split,
                 "stream_metadata": {
@@ -517,6 +560,7 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
                     "ruleset_counts": metadata.ruleset_counts,
                 },
                 "stream_buffer": stream.stats(),
+                "stream_offset_index": stream.supports_offset_index,
             },
         )
 
@@ -525,22 +569,37 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
         graphed_step = _make_graphed_step(args, device, boards, model, optimizer, loss_weights, amp_dtype)
 
         pin = device.type == "cuda"
-
-        def produce_train_batch() -> dict[str, torch.Tensor]:
-            records = stream.sample_ruleset_aware_batch(train_split, args.batch_size, train_rng, board_weights)
-            if args.augment_d4:
-                records = [augment_record_d4(record, train_rng.randrange(8)) for record in records]
-            return collate_cpu(records, pin_memory=pin)
-
-        prefetcher = BatchPrefetcher(produce_train_batch, depth=args.prefetch_batches) if args.prefetch_batches > 0 else None
-        checkpoint_lock = prefetcher.lock if prefetcher is not None else nullcontext()
+        train_loader = make_batch_dataloader(
+            StreamingRulesetAwareBatchDataset(
+                stream,
+                train_split,
+                args.batch_size,
+                train_rng,
+                board_weights,
+                augment_d4=args.augment_d4,
+            ),
+            pin_memory=pin,
+        )
+        val_loader = make_batch_dataloader(
+            StreamingRulesetAwareBatchDataset(
+                stream,
+                val_split,
+                args.batch_size,
+                val_rng,
+                board_weights,
+                advance=False,
+            ),
+            pin_memory=False,
+        )
+        train_iter = iter(train_loader)
+        val_iter = iter(val_loader)
         progress = ProgressBar(args.steps, start_step, args.batch_size, _progress_enabled(args))
         keeper = PinnedBatchKeeper(device.type == "cuda")
         logged_loss = float("nan")
         try:
             for step in range(start_step + 1, args.steps + 1):
                 model.train()
-                cpu_batch = prefetcher.next() if prefetcher is not None else produce_train_batch()
+                cpu_batch = next(train_iter)
                 batch = batch_to_device(cpu_batch, device)
                 keeper.fence(cpu_batch)
                 if graphed_step is not None:
@@ -571,28 +630,23 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
                     or step == args.steps
                 )
                 if should_checkpoint:
-                    with checkpoint_lock:
-                        save_checkpoint(
-                            model,
-                            optimizer,
-                            run_dir,
-                            step,
-                            args,
-                            model_config,
-                            train_rng,
-                            val_rng,
-                            scheduler=scheduler,
-                        )
-                if should_log:
-                    val_metrics = balanced_eval_streaming(
+                    save_checkpoint(
                         model,
-                        stream,
-                        val_split,
-                        args.batch_size,
+                        optimizer,
+                        run_dir,
+                        step,
+                        args,
+                        model_config,
+                        train_rng,
                         val_rng,
+                        scheduler=scheduler,
+                    )
+                if should_log:
+                    val_metrics = balanced_eval_loader(
+                        model,
+                        val_iter,
                         device,
                         args.loss_eval_batches,
-                        board_weights,
                         loss_weights,
                         amp_dtype,
                     )
@@ -610,8 +664,6 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
         finally:
             progress.clear()
             keeper.release_all()
-            if prefetcher is not None:
-                prefetcher.close()
 
     print(f"run_dir={run_dir}")
     print(f"metrics={metrics_path}")
@@ -619,7 +671,8 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    data_paths = [resolve_root_path(path) for path in args.data]
+    data_paths = expand_data_paths(resolve_root_path(path) for path in args.data)
+    _warn_deprecated_legacy_jsonl(data_paths)
     if _stream_buffer_bytes(args) > 0:
         _run_streaming(args, data_paths)
         return
@@ -666,6 +719,11 @@ def main(argv: list[str] | None = None) -> None:
         board_weights,
         device,
         model_config,
+        extra_config={
+            "data_loading": "eager_deprecated",
+            "data_pipeline": "torch_dataloader",
+            "data_format": data_format_label(data_paths),
+        },
     )
 
     early_eval_steps = step_set(args.early_eval_steps)
@@ -673,22 +731,34 @@ def main(argv: list[str] | None = None) -> None:
     graphed_step = _make_graphed_step(args, device, boards, model, optimizer, loss_weights, amp_dtype)
 
     pin = device.type == "cuda"
-
-    def produce_train_batch() -> dict[str, torch.Tensor]:
-        records = sample_ruleset_aware_batch(train_groups, args.batch_size, train_rng, board_weights)
-        if args.augment_d4:
-            records = [augment_record_d4(record, train_rng.randrange(8)) for record in records]
-        return collate_cpu(records, pin_memory=pin)
-
-    prefetcher = BatchPrefetcher(produce_train_batch, depth=args.prefetch_batches) if args.prefetch_batches > 0 else None
-    checkpoint_lock = prefetcher.lock if prefetcher is not None else nullcontext()
+    train_loader = make_batch_dataloader(
+        RulesetAwareBatchDataset(
+            train_groups,
+            args.batch_size,
+            train_rng,
+            board_weights,
+            augment_d4=args.augment_d4,
+        ),
+        pin_memory=pin,
+    )
+    val_loader = make_batch_dataloader(
+        RulesetAwareBatchDataset(
+            val_groups,
+            args.batch_size,
+            val_rng,
+            board_weights,
+        ),
+        pin_memory=False,
+    )
+    train_iter = iter(train_loader)
+    val_iter = iter(val_loader)
     progress = ProgressBar(args.steps, start_step, args.batch_size, _progress_enabled(args))
     keeper = PinnedBatchKeeper(device.type == "cuda")
     logged_loss = float("nan")
     try:
         for step in range(start_step + 1, args.steps + 1):
             model.train()
-            cpu_batch = prefetcher.next() if prefetcher is not None else produce_train_batch()
+            cpu_batch = next(train_iter)
             batch = batch_to_device(cpu_batch, device)
             keeper.fence(cpu_batch)
             if graphed_step is not None:
@@ -719,27 +789,23 @@ def main(argv: list[str] | None = None) -> None:
                 or step == args.steps
             )
             if should_checkpoint:
-                with checkpoint_lock:
-                    save_checkpoint(
-                        model,
-                        optimizer,
-                        run_dir,
-                        step,
-                        args,
-                        model_config,
-                        train_rng,
-                        val_rng,
-                        scheduler=scheduler,
-                    )
-            if should_log:
-                val_metrics = balanced_eval(
+                save_checkpoint(
                     model,
-                    val_groups,
-                    args.batch_size,
+                    optimizer,
+                    run_dir,
+                    step,
+                    args,
+                    model_config,
+                    train_rng,
                     val_rng,
+                    scheduler=scheduler,
+                )
+            if should_log:
+                val_metrics = balanced_eval_loader(
+                    model,
+                    val_iter,
                     device,
                     args.loss_eval_batches,
-                    board_weights,
                     loss_weights,
                     amp_dtype,
                 )
@@ -757,8 +823,6 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         progress.clear()
         keeper.release_all()
-        if prefetcher is not None:
-            prefetcher.close()
 
     print(f"run_dir={run_dir}")
     print(f"metrics={metrics_path}")

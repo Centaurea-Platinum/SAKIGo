@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from Training.common import BOARD_PLANE_COUNT, ROOT, SCHEMA_VERSION
+from Training.data import is_zstd_jsonl_path, open_jsonl_writer
 from Training.rulesets import (
     BLACK,
     WHITE,
@@ -106,6 +107,8 @@ def neighbors_for_board(board_size: int) -> list[tuple[int, ...]]:
 NEIGHBORS = neighbors_for_board(BOARD_SIZE)
 DEFAULT_RULESETS = ",".join(available_rulesets())
 DEFAULT_SAMPLES_PER_COMBINATION = 2**13
+DEFAULT_SAMPLES_PER_FILE = 2**16
+DEFAULT_ZSTD_LEVEL = 3
 PROGRESS_WIDTH = 24
 PROGRESS_MIN_INTERVAL_SECONDS = 0.25
 
@@ -646,6 +649,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Records per board-size/ruleset/komi combination. Default: {DEFAULT_SAMPLES_PER_COMBINATION}.",
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--samples-per-file",
+        type=int,
+        default=DEFAULT_SAMPLES_PER_FILE,
+        help=(
+            "Records per numbered .jsonl.zst shard. "
+            f"Default: {DEFAULT_SAMPLES_PER_FILE}. Set 0 to write one legacy output file."
+        ),
+    )
+    parser.add_argument(
+        "--zstd-level",
+        type=int,
+        default=DEFAULT_ZSTD_LEVEL,
+        help=f"Zstandard compression level for .jsonl.zst output. Default: {DEFAULT_ZSTD_LEVEL}.",
+    )
     parser.add_argument("--status", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--katago", type=Path, default=default_katago_path())
@@ -794,6 +812,87 @@ def write_status(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _strip_jsonl_suffix(path: Path) -> str:
+    name = path.name
+    for suffix in (".jsonl.zstd", ".jsonl.zst", ".jsonl"):
+        if name.lower().endswith(suffix):
+            return name[: -len(suffix)]
+    return path.stem if path.suffix else "samples"
+
+
+class GenerationOutputWriter:
+    def __init__(
+        self,
+        output: Path,
+        *,
+        samples_per_file: int,
+        zstd_level: int,
+    ) -> None:
+        if samples_per_file < 0:
+            raise ValueError("--samples-per-file must be non-negative")
+        if zstd_level < 1 or zstd_level > 22:
+            raise ValueError("--zstd-level must be in [1, 22]")
+        self.output = output
+        self.samples_per_file = samples_per_file
+        self.zstd_level = zstd_level
+        self.paths: list[Path] = []
+        self._handle: Any = None
+        self._shard_index = 0
+        self._samples_in_file = 0
+        self._single_file = samples_per_file == 0
+
+        if self._single_file:
+            self.directory = output.parent
+            self.prefix = output.stem
+        elif output.suffix:
+            self.directory = output.parent
+            self.prefix = _strip_jsonl_suffix(output)
+        else:
+            self.directory = output
+            self.prefix = "samples"
+        self.directory.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def data_format(self) -> str:
+        if self._single_file:
+            return "single_jsonl_zstd" if is_zstd_jsonl_path(self.output) else "legacy_single_jsonl_deprecated"
+        return "jsonl_zstd_shards"
+
+    def __enter__(self) -> GenerationOutputWriter:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+    def write_record(self, record: dict[str, Any]) -> None:
+        if self._handle is None or (
+            not self._single_file and self._samples_in_file >= self.samples_per_file
+        ):
+            self._rotate()
+        self._handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+        self._samples_in_file += 1
+
+    def flush(self) -> None:
+        if self._handle is not None:
+            self._handle.flush()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+
+    def _rotate(self) -> None:
+        self.close()
+        if self._single_file:
+            path = self.output
+        else:
+            path = self.directory / f"{self.prefix}_{self._shard_index:06d}.jsonl.zst"
+            self._shard_index += 1
+        self.paths.append(path)
+        self._samples_in_file = 0
+        self._handle = open_jsonl_writer(path, compression_level=self.zstd_level)
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -849,6 +948,16 @@ def run(argv: list[str] | None = None) -> None:
         for komi in komis
     ]
     config = args.config or default_config_path(args.katago)
+    if args.samples_per_file < 0:
+        raise ValueError("--samples-per-file must be non-negative")
+    if args.zstd_level < 1 or args.zstd_level > 22:
+        raise ValueError("--zstd-level must be in [1, 22]")
+    if args.samples_per_file == 0 and not is_zstd_jsonl_path(args.output):
+        print(
+            "warning: single plain JSONL generation is deprecated; prefer numbered .jsonl.zst shards",
+            file=sys.stderr,
+            flush=True,
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -971,7 +1080,11 @@ def run(argv: list[str] | None = None) -> None:
     proc.stdin.flush()
 
     try:
-        with args.output.open("w", encoding="utf-8") as output:
+        with GenerationOutputWriter(
+            args.output,
+            samples_per_file=args.samples_per_file,
+            zstd_level=args.zstd_level,
+        ) as output:
             while schedule.total_written < plan.target_samples:
                 if not pending:
                     raise RuntimeError("generation schedule exhausted before reaching target samples")
@@ -992,7 +1105,7 @@ def run(argv: list[str] | None = None) -> None:
 
                 record, budget = record_from_response(game, response)
                 schedule.complete(variant, success=True)
-                output.write(json.dumps(record, separators=(",", ":")) + "\n")
+                output.write_record(record)
 
                 action = sample_action(budget, game.rng, args.temperature)
                 game.play(action)
@@ -1030,6 +1143,9 @@ def run(argv: list[str] | None = None) -> None:
                         "active_games": len(pending),
                         "completed_games": completed_games,
                         "output": str(args.output),
+                        "output_files": [str(path) for path in output.paths],
+                        "data_format": output.data_format,
+                        "samples_per_file": args.samples_per_file,
                         "run_dir": str(args.run_dir),
                         "quota_mode": plan.quota_mode,
                         "samples_per_combination": plan.samples_per_combination,

@@ -15,11 +15,15 @@ from Model.sakigo_model import config_from_spec
 from Training.checkpoints import model_from_config
 from Training.data import (
     TRAIN_SPLIT,
+    StreamingRulesetAwareBatchDataset,
     StreamingJsonlBuffer,
     augment_record_d4,
     build_ruleset_groups,
     collate,
+    expand_data_paths,
     load_records,
+    make_batch_dataloader,
+    open_jsonl_writer,
     record_from_json,
     sample_ruleset_aware_batch,
     scan_jsonl_stream_metadata,
@@ -43,6 +47,7 @@ from Training.generate_katago_phase1 import (
     DEFAULT_RULESETS,
     DEFAULT_SAMPLES_PER_COMBINATION,
     GenerationProgressBar,
+    GenerationOutputWriter,
     GenerationSchedule,
     build_generation_plan,
     find_katago_path,
@@ -150,6 +155,12 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
         "".join(json.dumps(row) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def write_jsonl_zst(path: Path, rows: list[dict]) -> None:
+    with open_jsonl_writer(path) as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
 
 
 def test_katago_engine_lookup_prefers_host_executable_name(tmp_path: Path) -> None:
@@ -444,6 +455,42 @@ def test_split_and_streaming_scan_keep_rulesets_separate(tmp_path: Path) -> None
     assert sorted(metadata.ruleset_counts.values()) == [1, 1]
 
 
+def test_zstd_jsonl_shards_load_and_scan(tmp_path: Path) -> None:
+    shard_dir = tmp_path / "shards"
+    shard_dir.mkdir()
+    rows_a = [sample_record(f"a{index}") for index in range(3)]
+    rows_b = [sample_record(f"b{index}") for index in range(3)]
+    write_jsonl_zst(shard_dir / "samples_000000.jsonl.zst", rows_a)
+    write_jsonl_zst(shard_dir / "samples_000001.jsonl.zst", rows_b)
+
+    paths = expand_data_paths([shard_dir])
+    assert [path.name for path in paths] == ["samples_000000.jsonl.zst", "samples_000001.jsonl.zst"]
+    records = load_records(paths)
+    metadata = scan_jsonl_stream_metadata(paths, val_fraction=0.25, seed=4, use_cache=False)
+
+    assert len(records) == 6
+    assert metadata.record_count == 6
+    assert metadata.train_count + metadata.val_count == 6
+
+
+def test_generation_output_writer_rotates_zstd_shards(tmp_path: Path) -> None:
+    rows = [sample_record(f"p{index}") for index in range(5)]
+    with GenerationOutputWriter(
+        tmp_path / "samples.jsonl",
+        samples_per_file=2,
+        zstd_level=1,
+    ) as writer:
+        for row in rows:
+            writer.write_record(row)
+
+    assert [path.name for path in writer.paths] == [
+        "samples_000000.jsonl.zst",
+        "samples_000001.jsonl.zst",
+        "samples_000002.jsonl.zst",
+    ]
+    assert len(load_records(writer.paths)) == 5
+
+
 def test_ruleset_aware_eager_sampler_mixes_rulesets() -> None:
     rows = [
         *(sample_record_with_ruleset(f"chinese-{index}", "chinese") for index in range(4)),
@@ -455,6 +502,36 @@ def test_ruleset_aware_eager_sampler_mixes_rulesets() -> None:
 
     assert {record.ruleset["name"] for record in batch if record.ruleset is not None} == {"chinese", "japanese"}
     assert {record.board_size for record in batch} == {3}
+
+
+def test_streaming_batch_dataset_feeds_torch_dataloader(tmp_path: Path) -> None:
+    data_path = tmp_path / "stream.jsonl.zst"
+    rows = [sample_record(f"p{index}") for index in range(8)]
+    write_jsonl_zst(data_path, rows)
+    metadata = scan_jsonl_stream_metadata([data_path], val_fraction=0.0, seed=8, use_cache=False)
+
+    with StreamingJsonlBuffer(
+        paths=[data_path],
+        boards=[3],
+        val_fraction=0.0,
+        seed=8,
+        max_buffer_bytes=1024 * 1024,
+        metadata=metadata,
+    ) as stream:
+        stream.prime(minimum_records=2)
+        loader = make_batch_dataloader(
+            StreamingRulesetAwareBatchDataset(
+                stream,
+                TRAIN_SPLIT,
+                batch_size=4,
+                rng=random.Random(3),
+            ),
+            pin_memory=False,
+        )
+        batch = next(iter(loader))
+
+    assert batch["board"].shape == (4, 6, 3, 3)
+    assert batch["policy_target"].shape == (4, 10)
 
 
 def test_streaming_ruleset_aware_sampler_mixes_blocked_rulesets(tmp_path: Path) -> None:
@@ -676,11 +753,14 @@ def test_optimizer_excludes_offsets_norms_and_register_seed_from_weight_decay() 
 
 
 def test_streaming_train_smoke(tmp_path: Path) -> None:
-    data_path = tmp_path / "stream.jsonl"
+    data_dir = tmp_path / "stream_shards"
+    data_dir.mkdir()
     rows = [sample_record(f"p{index}") for index in range(24)]
-    write_jsonl(data_path, rows)
+    write_jsonl_zst(data_dir / "samples_000000.jsonl.zst", rows[:12])
+    write_jsonl_zst(data_dir / "samples_000001.jsonl.zst", rows[12:])
+    data_paths = expand_data_paths([data_dir])
 
-    metadata = scan_jsonl_stream_metadata([data_path], val_fraction=0.5, seed=11)
+    metadata = scan_jsonl_stream_metadata(data_paths, val_fraction=0.5, seed=11)
     assert metadata.record_count == 24
     assert metadata.train_count + metadata.val_count == 24
     assert metadata.board_counts == {3: 24}
@@ -689,7 +769,7 @@ def test_streaming_train_smoke(tmp_path: Path) -> None:
     train_main(
         [
             "--data",
-            str(data_path),
+            str(data_dir),
             "--run-dir",
             str(run_dir),
             "--device",
@@ -718,6 +798,8 @@ def test_streaming_train_smoke(tmp_path: Path) -> None:
     assert (run_dir / "checkpoints" / "step_000002.pt").exists()
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     assert config["data_loading"] == "streaming"
+    assert config["data_pipeline"] == "torch_dataloader"
+    assert config["data_format"] == "jsonl_zstd_shards"
     assert config["stream_metadata"]["record_count"] == 24
     assert config["stream_buffer"]["max_buffer_bytes"] == int(0.02 * 1024 * 1024)
 

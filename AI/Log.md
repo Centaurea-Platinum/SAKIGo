@@ -2,6 +2,13 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-05 - Switched training data to DataLoader-backed zstd shards
+
+- Added zstd JSONL support in [data.py](../Training/data.py): `.jsonl.zst` readers/writers, shard-directory/glob expansion, and format labels. Plain `.jsonl` remains readable but is treated as deprecated for training data.
+- Reworked [train.py](../Training/train.py) so the default path is bounded streaming (`--stream-buffer-mb 1024`) through PyTorch `IterableDataset` + `DataLoader`; `--stream-buffer-mb 0` keeps the deprecated eager path. The training loop no longer uses the custom background prefetcher.
+- Updated [generate_katago_phase1.py](../Training/generate_katago_phase1.py) to write numbered `.jsonl.zst` shards by default (`--samples-per-file 65536`, `--zstd-level 3`), with a legacy single-file escape hatch via `--samples-per-file 0`.
+- Updated [run_phase1_suite.py](../Training/run_phase1_suite.py) to accept directories, globs, or multiple shard paths. Verification: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest Training/test_training_orchestrator.py` passed (`27 passed`).
+
 ## 2026-07-05 - Added Linux KataGo engine support
 
 - Downloaded and checksum-verified the official KataGo v1.16.5 OpenCL Linux x64 archive into ignored local artifacts, then extracted it under `Distillation/engine/katago-v1.16.5-opencl-linux-x64/`.

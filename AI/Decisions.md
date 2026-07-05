@@ -2,9 +2,9 @@
 
 The *why* behind design choices, so later sessions don't relitigate settled ground or lose the reasoning. Newest first. Entries are living until built, then they freeze.
 
-## D23 - Large JSONL training uses a bounded streaming buffer (2026-07-03, implemented)
+## D23 - Large training data uses zstd JSONL shards and a DataLoader streaming buffer (2026-07-03, updated 2026-07-05)
 
-`Training.train` keeps eager loading as the default for tiny runs, but large Phase 1 JSONL training should pass `--stream-buffer-mb N`. Streaming mode scans metadata once, deterministically splits positions into train/validation by hash, keeps a rolling buffer of raw JSONL lines capped by the requested MiB budget, and decodes only sampled records into tensors. **Why:** the 2^18 Phase 1 file is about 5.7 GB on disk and would expand substantially if loaded as Python objects. A full-file smoke run passed with `--stream-buffer-mb 64`, yielding 236,411 train and 25,733 validation records from 262,144 rows. **Caveat:** the buffer budget is raw-line bytes, not exact Python heap usage; binary/sharded data may still be better for long production runs. Source: [train.py](../Training/train.py), [data.py](../Training/data.py), local smoke 2026-07-03.
+`Training.train` now defaults to bounded streaming (`--stream-buffer-mb 1024`) through PyTorch `IterableDataset` + `DataLoader` wrappers. The preferred data layout is numbered `.jsonl.zst` shards such as `samples_000000.jsonl.zst`; plain single `.jsonl` remains readable but is marked deprecated, and eager loading is only available with `--stream-buffer-mb 0`. Streaming scans metadata once, splits positions deterministically by hash, keeps decoded records under the requested buffer budget, and collates homogeneous/ruleset-balanced batches through DataLoader. **Why:** the 2^18 Phase 1 file is too large as expanded Python objects, while zstd shards avoid bloated individual files and make data management cleaner. Source: [train.py](../Training/train.py), [data.py](../Training/data.py), [generate_katago_phase1.py](../Training/generate_katago_phase1.py).
 
 ## D22 - Local KataGo Phase 1 batch-inference setting (2026-07-03, empirical)
 

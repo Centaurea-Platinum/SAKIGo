@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import dataclasses
+import glob
+import io
 import json
-import queue
 import random
 import threading
 from dataclasses import dataclass, field
 from hashlib import blake2b
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import numpy as np
 import torch
+import zstandard as zstd
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from .common import (
     BOARD_PLANE_COUNT,
@@ -30,6 +33,108 @@ from .rulesets import (
 
 TRAIN_SPLIT = "train"
 VAL_SPLIT = "val"
+ZSTD_JSONL_SUFFIXES = (".jsonl.zst", ".jsonl.zstd")
+LEGACY_JSONL_SUFFIX = ".jsonl"
+
+
+def is_zstd_jsonl_path(path: Path) -> bool:
+    name = path.name.lower()
+    return any(name.endswith(suffix) for suffix in ZSTD_JSONL_SUFFIXES)
+
+
+def is_legacy_jsonl_path(path: Path) -> bool:
+    return path.name.lower().endswith(LEGACY_JSONL_SUFFIX) and not is_zstd_jsonl_path(path)
+
+
+def data_format_label(paths: Iterable[Path]) -> str:
+    paths = list(paths)
+    if paths and all(is_zstd_jsonl_path(path) for path in paths):
+        return "jsonl_zstd_shards"
+    if paths and all(is_legacy_jsonl_path(path) for path in paths):
+        return "legacy_jsonl_deprecated"
+    return "mixed_jsonl"
+
+
+def expand_data_paths(paths: Iterable[Path]) -> list[Path]:
+    expanded: list[Path] = []
+    for path in paths:
+        raw = str(path)
+        if any(char in raw for char in "*?[]"):
+            expanded.extend(Path(match) for match in sorted(glob.glob(raw)))
+            continue
+        if path.is_dir():
+            candidates = sorted(path.glob("*.jsonl.zst"))
+            candidates.extend(sorted(path.glob("*.jsonl.zstd")))
+            if not candidates:
+                candidates = sorted(path.glob("*.jsonl"))
+            expanded.extend(candidates)
+            continue
+        expanded.append(path)
+    if not expanded:
+        raise ValueError("no data files matched --data")
+    return expanded
+
+
+class _ZstdTextReader:
+    def __init__(self, path: Path) -> None:
+        self._raw = path.open("rb")
+        self._reader = zstd.ZstdDecompressor().stream_reader(self._raw)
+        self._text = io.TextIOWrapper(self._reader, encoding="utf-8")
+
+    def readline(self) -> str:
+        return self._text.readline()
+
+    def __iter__(self):
+        return iter(self._text)
+
+    def close(self) -> None:
+        self._text.close()
+        self._reader.close()
+        self._raw.close()
+
+    def __enter__(self) -> _ZstdTextReader:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+
+class _ZstdTextWriter:
+    def __init__(self, path: Path, compression_level: int = 3) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._raw = path.open("wb")
+        compressor = zstd.ZstdCompressor(level=compression_level, threads=-1)
+        self._writer = compressor.stream_writer(self._raw, closefd=False)
+        self._text = io.TextIOWrapper(self._writer, encoding="utf-8")
+
+    def write(self, text: str) -> int:
+        return self._text.write(text)
+
+    def flush(self) -> None:
+        self._text.flush()
+
+    def close(self) -> None:
+        self._text.close()
+        self._raw.close()
+
+    def __enter__(self) -> _ZstdTextWriter:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+
+def open_jsonl_text(path: Path) -> TextIO | _ZstdTextReader:
+    if is_zstd_jsonl_path(path):
+        return _ZstdTextReader(path)
+    return path.open("r", encoding="utf-8")
+
+
+def open_jsonl_writer(path: Path, compression_level: int = 3) -> TextIO | _ZstdTextWriter:
+    if is_zstd_jsonl_path(path):
+        return _ZstdTextWriter(path, compression_level=compression_level)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path.open("w", encoding="utf-8")
 
 
 def _float_array(raw: Any, expected: int, label: str) -> np.ndarray:
@@ -162,7 +267,7 @@ def load_records(paths: Iterable[Path]) -> list[TrainingRecord]:
     for path in paths:
         if not path.exists():
             raise FileNotFoundError(f"missing data file: {path}")
-        with path.open("r", encoding="utf-8") as handle:
+        with open_jsonl_text(path) as handle:
             for line_number, line in enumerate(handle, start=1):
                 stripped = line.strip()
                 if not stripped:
@@ -327,7 +432,7 @@ def scan_jsonl_stream_metadata(
     for path in paths:
         if not path.exists():
             raise FileNotFoundError(f"missing data file: {path}")
-        with path.open("r", encoding="utf-8") as handle:
+        with open_jsonl_text(path) as handle:
             for line_number, line in enumerate(handle, start=1):
                 stripped = line.strip()
                 if not stripped:
@@ -402,6 +507,7 @@ class StreamingJsonlBuffer:
         self.paths = list(paths)
         if not self.paths:
             raise ValueError("at least one data path is required")
+        self.supports_offset_index = not any(is_zstd_jsonl_path(path) for path in self.paths)
         self.boards = set(boards)
         if not self.boards:
             raise ValueError("at least one board size is required")
@@ -497,18 +603,19 @@ class StreamingJsonlBuffer:
         if self.metadata.count_for_split(split) <= 0:
             raise ValueError(f"no records are available for split {split}")
         with self.lock:
-            self._ensure_offset_index()
-            assert self._offset_index is not None
-            indexed_sizes = sorted(self._offset_index.get(split, {}))
-            if indexed_sizes:
-                board_size = _choose_board_size(indexed_sizes, rng, board_weights)
-                return self._sample_ruleset_batch_from_index(
-                    split,
-                    board_size,
-                    batch_size,
-                    rng,
-                    advance,
-                )
+            if self.supports_offset_index:
+                self._ensure_offset_index()
+                assert self._offset_index is not None
+                indexed_sizes = sorted(self._offset_index.get(split, {}))
+                if indexed_sizes:
+                    board_size = _choose_board_size(indexed_sizes, rng, board_weights)
+                    return self._sample_ruleset_batch_from_index(
+                        split,
+                        board_size,
+                        batch_size,
+                        rng,
+                        advance,
+                    )
             self._ensure_split_available(split)
             sizes = sorted({entry.board_size for entry in self.entries if entry.split == split})
             if not sizes:
@@ -535,6 +642,8 @@ class StreamingJsonlBuffer:
 
     def build_ruleset_index(self) -> None:
         with self.lock:
+            if not self.supports_offset_index:
+                return
             self._ensure_offset_index()
 
     def stats(self) -> dict[str, int]:
@@ -560,6 +669,8 @@ class StreamingJsonlBuffer:
     def _ensure_offset_index(self) -> None:
         if self._offset_index is not None:
             return
+        if not self.supports_offset_index:
+            raise ValueError("offset indexing is not available for compressed JSONL streams")
         index: dict[str, dict[int, dict[str, list[JsonlRecordOffset]]]] = {
             TRAIN_SPLIT: {},
             VAL_SPLIT: {},
@@ -920,7 +1031,7 @@ class StreamingJsonlBuffer:
         while True:
             if self._handle is None:
                 path = self.paths[self._path_index]
-                self._handle = path.open("r", encoding="utf-8")
+                self._handle = open_jsonl_text(path)
                 self._line_number = 0
             line = self._handle.readline()
             if line:
@@ -1143,10 +1254,95 @@ def collate(records: list[TrainingRecord], device: torch.device) -> dict[str, to
     Pinned + non_blocking staging is reserved for the training path, where
     PinnedBatchKeeper fences the staging buffers' lifetime with CUDA events.
     Freeing a pinned staging tensor while its async H2D copy is still queued
-    lets the caching host allocator recycle the block (e.g. for the prefetch
-    thread), which silently corrupts the copied batch.
+    lets the caching host allocator recycle the block before the copy finishes,
+    which silently corrupts the copied batch.
     """
     return batch_to_device(collate_cpu(records, pin_memory=False), device, non_blocking=False)
+
+
+class RulesetAwareBatchDataset(IterableDataset[list[TrainingRecord]]):
+    """Infinite iterable dataset yielding homogeneous, ruleset-balanced record batches."""
+
+    def __init__(
+        self,
+        groups_by_size: dict[int, dict[str, list[list[TrainingRecord]]]],
+        batch_size: int,
+        rng: random.Random,
+        board_weights: Mapping[int, float] | None = None,
+        *,
+        augment_d4: bool = False,
+    ) -> None:
+        self.groups_by_size = groups_by_size
+        self.batch_size = batch_size
+        self.rng = rng
+        self.board_weights = board_weights
+        self.augment_d4 = augment_d4
+
+    def __iter__(self):
+        if get_worker_info() is not None:
+            raise ValueError("RulesetAwareBatchDataset requires DataLoader(num_workers=0)")
+        while True:
+            records = sample_ruleset_aware_batch(
+                self.groups_by_size,
+                self.batch_size,
+                self.rng,
+                self.board_weights,
+            )
+            if self.augment_d4:
+                records = [augment_record_d4(record, self.rng.randrange(8)) for record in records]
+            yield records
+
+
+class StreamingRulesetAwareBatchDataset(IterableDataset[list[TrainingRecord]]):
+    """Infinite iterable dataset backed by StreamingJsonlBuffer."""
+
+    def __init__(
+        self,
+        stream: StreamingJsonlBuffer,
+        split: str,
+        batch_size: int,
+        rng: random.Random,
+        board_weights: Mapping[int, float] | None = None,
+        *,
+        augment_d4: bool = False,
+        advance: bool = True,
+    ) -> None:
+        self.stream = stream
+        self.split = split
+        self.batch_size = batch_size
+        self.rng = rng
+        self.board_weights = board_weights
+        self.augment_d4 = augment_d4
+        self.advance = advance
+
+    def __iter__(self):
+        if get_worker_info() is not None:
+            raise ValueError("StreamingRulesetAwareBatchDataset requires DataLoader(num_workers=0)")
+        while True:
+            records = self.stream.sample_ruleset_aware_batch(
+                self.split,
+                self.batch_size,
+                self.rng,
+                self.board_weights,
+                advance=self.advance,
+            )
+            if self.augment_d4:
+                records = [augment_record_d4(record, self.rng.randrange(8)) for record in records]
+            yield records
+
+
+def make_batch_dataloader(
+    dataset: IterableDataset[list[TrainingRecord]],
+    *,
+    pin_memory: bool,
+) -> DataLoader:
+    return DataLoader(
+        dataset,
+        batch_size=None,
+        collate_fn=lambda records: collate_cpu(records, pin_memory=False),
+        num_workers=0,
+        pin_memory=pin_memory,
+    )
 
 
 class PinnedBatchKeeper:
@@ -1170,64 +1366,3 @@ class PinnedBatchKeeper:
 
     def release_all(self) -> None:
         self._pending.clear()
-
-
-class BatchPrefetcher:
-    """Assembles CPU batches on a background thread so ingest overlaps the GPU step.
-
-    produce_fn must be thread-safe (the streaming buffer locks internally; the
-    sampling rng is only ever touched from the producer thread).
-    """
-
-    def __init__(
-        self,
-        produce_fn: Callable[[], dict[str, torch.Tensor]],
-        depth: int = 2,
-    ) -> None:
-        if depth <= 0:
-            raise ValueError("prefetch depth must be positive")
-        self._produce_fn = produce_fn
-        # Held while producing; lets the trainer snapshot rng state between batches (checkpointing).
-        self.lock = threading.Lock()
-        self._queue: queue.Queue[dict[str, torch.Tensor] | None] = queue.Queue(maxsize=depth)
-        self._error: BaseException | None = None
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="batch-prefetch", daemon=True)
-        self._thread.start()
-
-    def _run(self) -> None:
-        try:
-            while not self._stop.is_set():
-                with self.lock:
-                    batch = self._produce_fn()
-                while not self._stop.is_set():
-                    try:
-                        self._queue.put(batch, timeout=0.1)
-                        break
-                    except queue.Full:
-                        continue
-        except BaseException as exc:  # propagate to the consumer
-            self._error = exc
-            self._queue.put(None)
-
-    def next(self) -> dict[str, torch.Tensor]:
-        item = self._queue.get()
-        if item is None:
-            assert self._error is not None
-            raise self._error
-        return item
-
-    def close(self) -> None:
-        self._stop.set()
-        while True:
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                break
-        self._thread.join(timeout=5.0)
-
-    def __enter__(self) -> BatchPrefetcher:
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()

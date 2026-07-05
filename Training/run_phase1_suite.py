@@ -8,7 +8,7 @@ For every model spec (default: model1 and model2) this script
    automatically for non-equivariant specs.
 
 Example:
-    uv run python -m Training.run_phase1_suite --data Training/data/katago_phase1_20260703_172838/samples.jsonl
+    uv run python -m Training.run_phase1_suite --data Training/data/katago_phase1_20260705_shards
 """
 
 from __future__ import annotations
@@ -33,7 +33,15 @@ if str(ROOT) not in sys.path:
 from Model.sakigo_model import config_from_spec  # noqa: E402
 from Training.checkpoints import model_from_config  # noqa: E402
 from Training.common import resolve_root_path, training_device  # noqa: E402
-from Training.data import build_groups, collate, record_from_json, sample_batch, scan_jsonl_stream_metadata  # noqa: E402
+from Training.data import (  # noqa: E402
+    build_groups,
+    collate,
+    expand_data_paths,
+    open_jsonl_text,
+    record_from_json,
+    sample_batch,
+    scan_jsonl_stream_metadata,
+)
 from Training.losses import LossWeights  # noqa: E402
 from Training.train import _make_optimizer, _train_batch  # noqa: E402
 
@@ -42,7 +50,7 @@ DEFAULT_SPECS = "model1,model2"
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", required=True, help="Phase 1 JSONL file.")
+    parser.add_argument("--data", nargs="+", required=True, help="Phase 1 JSONL/ZSTD shard file(s), glob, or directory.")
     parser.add_argument("--specs", default=DEFAULT_SPECS, help="Comma-separated model specs to train.")
     parser.add_argument("--epochs", type=float, default=1.0, help="Samples-seen budget in train-split epochs.")
     parser.add_argument(
@@ -88,17 +96,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def load_sweep_records(path: Path, count: int) -> list:
+def load_sweep_records(paths: list[Path], count: int) -> list:
     records = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if len(records) >= count:
-                break
-            stripped = line.strip()
-            if stripped:
-                records.append(record_from_json(json.loads(stripped), path, line_number))
+    for path in paths:
+        with open_jsonl_text(path) as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if len(records) >= count:
+                    break
+                stripped = line.strip()
+                if stripped:
+                    records.append(record_from_json(json.loads(stripped), path, line_number))
+        if len(records) >= count:
+            break
     if not records:
-        raise ValueError(f"no records read from {path}")
+        raise ValueError("no records read from data paths")
     return records
 
 
@@ -185,20 +196,21 @@ def final_val_loss(run_dir: Path) -> float | None:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    data_path = resolve_root_path(args.data)
+    data_paths = expand_data_paths(resolve_root_path(path) for path in args.data)
     specs = [part.strip() for part in args.specs.split(",") if part.strip()]
     candidates = [int(part) for part in args.batch_candidates.split(",") if part.strip()]
     device = training_device("auto")
     amp_dtype = torch.bfloat16 if device.type == "cuda" else None
     run_prefix = args.run_prefix or time.strftime("phase1_%Y%m%d_%H%M%S")
 
-    print(f"device={device}  data={data_path}")
+    data_label = str(data_paths[0]) if len(data_paths) == 1 else f"{len(data_paths)} files"
+    print(f"device={device}  data={data_label}")
     print("Scanning data for split counts (one full pass)...", flush=True)
-    metadata = scan_jsonl_stream_metadata([data_path], val_fraction=args.val_fraction, seed=args.seed)
+    metadata = scan_jsonl_stream_metadata(data_paths, val_fraction=args.val_fraction, seed=args.seed)
     train_count = metadata.train_count or metadata.record_count
     print(f"records={metadata.record_count}  train={metadata.train_count}  val={metadata.val_count}")
 
-    sweep_records = load_sweep_records(data_path, args.sweep_records) if args.sweep else []
+    sweep_records = load_sweep_records(data_paths, args.sweep_records) if args.sweep else []
     memory_budget = 0
     if args.sweep and device.type == "cuda":
         total_memory = torch.cuda.get_device_properties(device).total_memory
@@ -283,7 +295,7 @@ def main(argv: list[str] | None = None) -> None:
             "-m",
             "Training.train",
             "--data",
-            str(data_path),
+            *(str(path) for path in data_paths),
             "--stream-buffer-mb",
             str(args.stream_buffer_mb),
             "--steps",
