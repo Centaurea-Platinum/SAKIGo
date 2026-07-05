@@ -2,6 +2,12 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-05 - Added Linux KataGo engine support
+
+- Downloaded and checksum-verified the official KataGo v1.16.5 OpenCL Linux x64 archive into ignored local artifacts, then extracted it under `Distillation/engine/katago-v1.16.5-opencl-linux-x64/`.
+- Updated [generate_katago_phase1.py](../Training/generate_katago_phase1.py) so the default engine lookup prefers `katago.exe` on Windows and `katago` on Linux/macOS; added regression coverage in [test_training_orchestrator.py](../Training/test_training_orchestrator.py).
+- Added [Distillation/README.md](../Distillation/README.md) documenting the ignored artifact layout and Linux download command.
+
 ## 2026-07-05 - Denoted SAKI acronym
 
 - Added the public README definition: **SAKI** currently stands for **SymmetryAwareKatago-DistillationImplementation**.

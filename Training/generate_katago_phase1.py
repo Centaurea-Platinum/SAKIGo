@@ -36,11 +36,25 @@ DEFAULT_BOARD_SIZES = "13,16,19"
 DEFAULT_KOMIS = ",".join(f"{index * 0.5:.1f}" for index in range(27))
 
 
-def default_katago_path() -> Path:
-    candidates = sorted((ROOT / "Distillation" / "engine").glob("*/katago.exe"))
+def katago_executable_names(platform_name: str | None = None) -> tuple[str, ...]:
+    platform_key = (platform_name or sys.platform).lower()
+    if platform_key.startswith("win"):
+        return ("katago.exe", "katago")
+    return ("katago", "katago.exe")
+
+
+def find_katago_path(engine_root: Path, platform_name: str | None = None) -> Path:
+    candidates: list[Path] = []
+    for executable_name in katago_executable_names(platform_name):
+        candidates.extend(sorted(engine_root.glob(f"*/{executable_name}")))
     if not candidates:
-        raise FileNotFoundError("could not find Distillation/engine/*/katago.exe")
+        names = ", ".join(katago_executable_names(platform_name))
+        raise FileNotFoundError(f"could not find Distillation/engine/*/{{{names}}}")
     return candidates[0]
+
+
+def default_katago_path() -> Path:
+    return find_katago_path(ROOT / "Distillation" / "engine")
 
 
 def default_config_path(katago_path: Path) -> Path:

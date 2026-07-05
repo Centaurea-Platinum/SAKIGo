@@ -42,6 +42,8 @@ from Training.generate_katago_phase1 import (
     DEFAULT_SAMPLES_PER_COMBINATION,
     GenerationSchedule,
     build_generation_plan,
+    find_katago_path,
+    katago_executable_names,
     parse_board_sizes,
     parse_komis,
     parse_ruleset_names,
@@ -145,6 +147,21 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
         "".join(json.dumps(row) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def test_katago_engine_lookup_prefers_host_executable_name(tmp_path: Path) -> None:
+    engine_root = tmp_path / "engine"
+    windows_engine = engine_root / "katago-v1.16.5-windows-x64"
+    linux_engine = engine_root / "katago-v1.16.5-opencl-linux-x64"
+    windows_engine.mkdir(parents=True)
+    linux_engine.mkdir(parents=True)
+    (windows_engine / "katago.exe").touch()
+    (linux_engine / "katago").touch()
+
+    assert katago_executable_names("win32")[0] == "katago.exe"
+    assert katago_executable_names("linux")[0] == "katago"
+    assert find_katago_path(engine_root, "win32") == windows_engine / "katago.exe"
+    assert find_katago_path(engine_root, "linux") == linux_engine / "katago"
 
 
 def test_record_validation_rejects_bad_lengths_and_missing_targets() -> None:
