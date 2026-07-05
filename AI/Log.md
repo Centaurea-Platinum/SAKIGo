@@ -2,6 +2,10 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-06 - Step-0 baseline checkpoint/metrics
+
+- Training now checkpoints and evaluates the *initialized* model at step 0 (fresh runs only, skipped on resume) and drops the step-1 special case: metric/checkpoint steps form an arithmetic sequence (0, interval, 2·interval, ...). Step-0 train columns are blank (no batches seen); val columns are real. Tests updated; 51 pytest green.
+
 ## 2026-07-06 - Simplification pass + HTML pipeline viewer
 
 - Cut non-standard/stale machinery (-366 lines net): CUDA-graphs train-step capture (`graph_step.py`, `--cuda-graphs`, capturable-AdamW branches — measured ~3% at batch 128; inference has its own graph path in `SakiGoInference`), eager sampling remnants orphaned by streaming-only training (`RulesetAwareBatchDataset`, module-level `sample_ruleset_aware_batch`, `build_ruleset_groups`, `split_records`, `filter_records_by_boards`, `StreamingJsonlBuffer.sample_batch` + its pop path), and the speculative `prettyterm` adapter (plain ANSI now; also fixed progress-bar padding counting invisible escape codes). Kept: `load_records`/`build_groups`/`sample_batch` (suite sweep), both streaming sampling engines (offset index for plain jsonl, eviction buffer for zst — each is the only option for its format). The without-replacement test now runs on zst so it exercises the buffer path. 51 pytest green.

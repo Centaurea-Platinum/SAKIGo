@@ -651,6 +651,7 @@ def test_train_smoke_and_resume(tmp_path: Path) -> None:
         "3",
     ]
     train_main([*base_args, "--steps", "1"])
+    assert (run_dir / "checkpoints" / "step_000000.pt").exists()
     first_checkpoint = run_dir / "checkpoints" / "step_000001.pt"
     assert first_checkpoint.exists()
 
@@ -659,7 +660,10 @@ def test_train_smoke_and_resume(tmp_path: Path) -> None:
 
     with (run_dir / "metrics.csv").open("r", newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert [row["step"] for row in rows] == ["1", "2"]
+    assert [row["step"] for row in rows] == ["0", "1", "2"]
+    # Step 0 has no train batches: train columns are blank, val columns real.
+    assert rows[0]["train_loss"] == ""
+    assert rows[0]["val_loss"] != ""
     assert rows[-1]["val_policy_loss"]
 
 
@@ -700,8 +704,9 @@ def test_train_only_logs_on_log_steps(tmp_path: Path) -> None:
 
     with (run_dir / "metrics.csv").open("r", newline="", encoding="utf-8") as handle:
         metrics_rows = list(csv.DictReader(handle))
-    assert [row["step"] for row in metrics_rows] == ["1", "3"]
-    assert metrics_rows[-1]["train_wdl_target_count"] == "4"
+    assert [row["step"] for row in metrics_rows] == ["0", "3"]
+    # The final row accumulates all 3 train steps (batch 2 -> 6 targets).
+    assert metrics_rows[-1]["train_wdl_target_count"] == "6"
 
 
 def test_optimizer_excludes_offsets_norms_and_register_seed_from_weight_decay() -> None:
@@ -782,7 +787,7 @@ def test_streaming_train_smoke(tmp_path: Path) -> None:
 
     with (run_dir / "metrics.csv").open("r", newline="", encoding="utf-8") as handle:
         metrics_rows = list(csv.DictReader(handle))
-    assert [row["step"] for row in metrics_rows] == ["1", "2"]
+    assert [row["step"] for row in metrics_rows] == ["0", "1", "2"]
 
 
 def test_streaming_train_buffer_samples_without_replacement(tmp_path: Path) -> None:

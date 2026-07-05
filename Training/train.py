@@ -409,7 +409,46 @@ def _run_training_loop(
     progress = ProgressBar(args.steps, start_step, args.batch_size, _progress_enabled(args))
     keeper = PinnedBatchKeeper(device.type == "cuda")
     logged_loss = float("nan")
+
+    def log_step(step: int) -> None:
+        nonlocal logged_loss
+        val_metrics = balanced_eval_loader(
+            model,
+            val_iter,
+            device,
+            args.loss_eval_batches,
+            loss_weights,
+            amp_dtype,
+        )
+        row: dict[str, float | int] = {
+            "step": step,
+            **prefixed("train", train_metrics.averages()),
+            **prefixed("val", val_metrics.averages()),
+        }
+        logged_loss = float(row["train_loss"])
+        add_val_confusion(row, val_metrics)
+        append_metrics(metrics_path, row)
+        progress.clear()
+        print(progress_line(row), flush=True)
+        train_metrics.reset()
+
     try:
+        if start_step == 0 and not args.resume:
+            # Step 0: checkpoint and evaluate the initialized model so the
+            # metrics/checkpoint steps form an arithmetic sequence
+            # (0, interval, 2*interval, ...). Train columns are blank (NaN).
+            save_checkpoint(
+                model,
+                optimizer,
+                run_dir,
+                0,
+                args,
+                model_config,
+                train_rng,
+                val_rng,
+                scheduler=scheduler,
+            )
+            log_step(0)
         for step in range(start_step + 1, args.steps + 1):
             model.train()
             cpu_batch = next(train_iter)
@@ -434,8 +473,7 @@ def _run_training_loop(
                 or step == args.steps
             )
             should_log = (
-                step == 1
-                or step % args.log_interval == 0
+                step % args.log_interval == 0
                 or should_checkpoint
                 or step == args.steps
             )
@@ -452,25 +490,7 @@ def _run_training_loop(
                     scheduler=scheduler,
                 )
             if should_log:
-                val_metrics = balanced_eval_loader(
-                    model,
-                    val_iter,
-                    device,
-                    args.loss_eval_batches,
-                    loss_weights,
-                    amp_dtype,
-                )
-                row: dict[str, float | int] = {
-                    "step": step,
-                    **prefixed("train", train_metrics.averages()),
-                    **prefixed("val", val_metrics.averages()),
-                }
-                logged_loss = float(row["train_loss"])
-                add_val_confusion(row, val_metrics)
-                append_metrics(metrics_path, row)
-                progress.clear()
-                print(progress_line(row), flush=True)
-                train_metrics.reset()
+                log_step(step)
     finally:
         progress.clear()
         keeper.release_all()
