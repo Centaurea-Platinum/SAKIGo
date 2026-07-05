@@ -494,6 +494,7 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
         metadata=metadata,
     ) as stream:
         stream.prime(args.batch_size)
+        stream.build_ruleset_index()
         _write_run_config(
             run_dir,
             args,

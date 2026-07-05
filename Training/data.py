@@ -213,6 +213,13 @@ class BufferedJsonlRecord:
     ruleset_key: str
 
 
+@dataclass(frozen=True)
+class JsonlRecordOffset:
+    path_index: int
+    byte_offset: int
+    line_number: int
+
+
 def _choose_board_size(
     sizes: Iterable[int],
     rng: random.Random,
@@ -411,11 +418,17 @@ class StreamingJsonlBuffer:
         self._line_number = 0
         self._pending_entry: BufferedJsonlRecord | None = None
         self._reader_at_eof = False
+        self._offset_index: dict[str, dict[int, dict[str, list[JsonlRecordOffset]]]] | None = None
+        self._offset_bags: dict[tuple[str, int, str], list[JsonlRecordOffset]] = {}
+        self._offset_handles: dict[int, Any] = {}
 
     def close(self) -> None:
         if self._handle is not None:
             self._handle.close()
             self._handle = None
+        for handle in self._offset_handles.values():
+            handle.close()
+        self._offset_handles.clear()
 
     def __enter__(self) -> StreamingJsonlBuffer:
         return self
@@ -484,6 +497,18 @@ class StreamingJsonlBuffer:
         if self.metadata.count_for_split(split) <= 0:
             raise ValueError(f"no records are available for split {split}")
         with self.lock:
+            self._ensure_offset_index()
+            assert self._offset_index is not None
+            indexed_sizes = sorted(self._offset_index.get(split, {}))
+            if indexed_sizes:
+                board_size = _choose_board_size(indexed_sizes, rng, board_weights)
+                return self._sample_ruleset_batch_from_index(
+                    split,
+                    board_size,
+                    batch_size,
+                    rng,
+                    advance,
+                )
             self._ensure_split_available(split)
             sizes = sorted({entry.board_size for entry in self.entries if entry.split == split})
             if not sizes:
@@ -508,6 +533,10 @@ class StreamingJsonlBuffer:
                     raise ValueError("streaming buffer could not advance")
                 self._add_entry(entry)
 
+    def build_ruleset_index(self) -> None:
+        with self.lock:
+            self._ensure_offset_index()
+
     def stats(self) -> dict[str, int]:
         with self.lock:
             return {
@@ -515,7 +544,127 @@ class StreamingJsonlBuffer:
                 "buffer_records": len(self.entries),
                 "max_buffer_bytes": self.max_buffer_bytes,
                 "buffer_rulesets": len({entry.ruleset_key for entry in self.entries}),
+                "offset_index_records": self._offset_index_record_count(),
             }
+
+    def _offset_index_record_count(self) -> int:
+        if self._offset_index is None:
+            return 0
+        return sum(
+            len(offsets)
+            for split_groups in self._offset_index.values()
+            for board_groups in split_groups.values()
+            for offsets in board_groups.values()
+        )
+
+    def _ensure_offset_index(self) -> None:
+        if self._offset_index is not None:
+            return
+        index: dict[str, dict[int, dict[str, list[JsonlRecordOffset]]]] = {
+            TRAIN_SPLIT: {},
+            VAL_SPLIT: {},
+        }
+        for path_index, path in enumerate(self.paths):
+            with path.open("rb") as handle:
+                line_number = 0
+                while True:
+                    byte_offset = handle.tell()
+                    line = handle.readline()
+                    if not line:
+                        break
+                    line_number += 1
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    board_size, position_key, ruleset_key = _line_board_position_and_ruleset(
+                        stripped.decode("utf-8"),
+                        path,
+                        line_number,
+                    )
+                    if board_size not in self.boards:
+                        continue
+                    split = split_for_position(
+                        board_size,
+                        position_key,
+                        self.val_fraction,
+                        self.seed,
+                        ruleset_key,
+                    )
+                    index.setdefault(split, {}).setdefault(board_size, {}).setdefault(ruleset_key, []).append(
+                        JsonlRecordOffset(
+                            path_index=path_index,
+                            byte_offset=byte_offset,
+                            line_number=line_number,
+                        )
+                    )
+        self._offset_index = {
+            split: {
+                board_size: {
+                    ruleset_key: offsets
+                    for ruleset_key, offsets in ruleset_groups.items()
+                    if offsets
+                }
+                for board_size, ruleset_groups in board_groups.items()
+                if ruleset_groups
+            }
+            for split, board_groups in index.items()
+        }
+        if not any(self._offset_index.values()):
+            raise ValueError("streaming ruleset index could not load any records")
+
+    def _sample_ruleset_batch_from_index(
+        self,
+        split: str,
+        board_size: int,
+        batch_size: int,
+        rng: random.Random,
+        advance: bool,
+    ) -> list[TrainingRecord]:
+        assert self._offset_index is not None
+        ruleset_groups = self._offset_index[split][board_size]
+        records: list[TrainingRecord] = []
+        for ruleset_key in _balanced_key_order(sorted(ruleset_groups), batch_size, rng):
+            records.append(self._read_indexed_record(split, board_size, ruleset_key, rng, advance))
+        return records
+
+    def _read_indexed_record(
+        self,
+        split: str,
+        board_size: int,
+        ruleset_key: str,
+        rng: random.Random,
+        advance: bool,
+    ) -> TrainingRecord:
+        assert self._offset_index is not None
+        offsets = self._offset_index[split][board_size][ruleset_key]
+        if advance:
+            bag_key = (split, board_size, ruleset_key)
+            bag = self._offset_bags.get(bag_key)
+            if not bag:
+                bag = offsets.copy()
+                rng.shuffle(bag)
+                self._offset_bags[bag_key] = bag
+            offset = bag.pop()
+        else:
+            offset = rng.choice(offsets)
+        return self._record_at_offset(offset)
+
+    def _record_at_offset(self, offset: JsonlRecordOffset) -> TrainingRecord:
+        handle = self._offset_handles.get(offset.path_index)
+        if handle is None:
+            handle = self.paths[offset.path_index].open("rb")
+            self._offset_handles[offset.path_index] = handle
+        handle.seek(offset.byte_offset)
+        line = handle.readline()
+        if not line:
+            raise ValueError(
+                f"missing record at {self.paths[offset.path_index]}:{offset.line_number}"
+            )
+        return record_from_json(
+            json.loads(line),
+            self.paths[offset.path_index],
+            offset.line_number,
+        )
 
     def _ensure_split_available(self, split: str) -> None:
         while not any(entry.split == split for entry in self.entries):

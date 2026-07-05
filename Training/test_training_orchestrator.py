@@ -453,10 +453,11 @@ def test_streaming_ruleset_aware_sampler_mixes_blocked_rulesets(tmp_path: Path) 
         boards=[3],
         val_fraction=0.0,
         seed=9,
-        max_buffer_bytes=record_bytes * 3,
+        max_buffer_bytes=record_bytes,
         metadata=metadata,
     ) as stream:
-        stream.prime(minimum_records=2)
+        stream.prime(minimum_records=1)
+        assert stream.stats()["buffer_rulesets"] == 1
         batch = stream.sample_ruleset_aware_batch(TRAIN_SPLIT, 4, random.Random(5))
 
     assert {record.ruleset["name"] for record in batch if record.ruleset is not None} == {"chinese", "japanese"}
