@@ -106,6 +106,138 @@ def neighbors_for_board(board_size: int) -> list[tuple[int, ...]]:
 NEIGHBORS = neighbors_for_board(BOARD_SIZE)
 DEFAULT_RULESETS = ",".join(available_rulesets())
 DEFAULT_SAMPLES_PER_COMBINATION = 2**13
+PROGRESS_WIDTH = 24
+PROGRESS_MIN_INTERVAL_SECONDS = 0.25
+
+
+def _duration_text(seconds: float) -> str:
+    total = max(0, int(seconds))
+    minutes, sec = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{sec:02d}"
+    return f"{minutes:d}:{sec:02d}"
+
+
+class _TerminalPalette:
+    """Small prettyterm adapter with an ANSI fallback.
+
+    The optional prettyterm package is not required for non-interactive or CI
+    runs. When it is available, this tries a few common style-call shapes and
+    falls back to direct ANSI escape codes otherwise.
+    """
+
+    _ANSI = {
+        "cyan": "36",
+        "green": "32",
+        "yellow": "33",
+        "dim": "2",
+    }
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        try:
+            import prettyterm  # type: ignore[import-not-found]
+        except Exception:
+            prettyterm = None
+        self._prettyterm = prettyterm
+
+    def style(self, text: str, color: str, *, bold: bool = False) -> str:
+        if not self.enabled:
+            return text
+        styled = self._prettyterm_style(text, color, bold=bold)
+        if styled is not None:
+            return styled
+        codes: list[str] = []
+        if bold:
+            codes.append("1")
+        ansi = self._ANSI.get(color)
+        if ansi is not None:
+            codes.append(ansi)
+        if not codes:
+            return text
+        return f"\033[{';'.join(codes)}m{text}\033[0m"
+
+    def _prettyterm_style(self, text: str, color: str, *, bold: bool) -> str | None:
+        prettyterm = self._prettyterm
+        if prettyterm is None:
+            return None
+        for name in ("style", "color", "paint"):
+            function = getattr(prettyterm, name, None)
+            if not callable(function):
+                continue
+            for kwargs in ({"fg": color, "bold": bold}, {"color": color, "bold": bold}):
+                try:
+                    return str(function(text, **kwargs))
+                except TypeError:
+                    continue
+        function = getattr(prettyterm, color, None)
+        if callable(function):
+            try:
+                return str(function(text))
+            except TypeError:
+                return None
+        return None
+
+
+class GenerationProgressBar:
+    """Brief single-line progress display for interactive generation runs."""
+
+    def __init__(
+        self,
+        target_samples: int,
+        *,
+        enabled: bool,
+        width: int = PROGRESS_WIDTH,
+        color: bool = True,
+    ) -> None:
+        self.target = max(1, target_samples)
+        self.enabled = enabled
+        self.width = max(4, width)
+        self.started_at = time.monotonic()
+        self._last_render = 0.0
+        self._line_len = 0
+        self._palette = _TerminalPalette(enabled and color)
+
+    def render(
+        self,
+        *,
+        samples: int,
+        samples_per_second: float,
+        eta_seconds: float,
+        completed_combinations: int,
+        combination_count: int,
+        force: bool = False,
+    ) -> None:
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_render < PROGRESS_MIN_INTERVAL_SECONDS:
+            return
+        self._last_render = now
+        ratio = min(1.0, max(0.0, samples / self.target))
+        filled = min(self.width, int(self.width * ratio))
+        remaining = self.width - filled
+        bar = (
+            self._palette.style("#" * filled, "green")
+            + self._palette.style("-" * remaining, "dim")
+        )
+        label = self._palette.style("generate", "cyan", bold=True)
+        pct = self._palette.style(f"{ratio * 100.0:5.1f}%", "yellow", bold=True)
+        text = (
+            f"{label} [{bar}] {pct} {samples:,}/{self.target:,} visits "
+            f"{samples_per_second:,.1f}/s eta {_duration_text(eta_seconds)} "
+            f"combos {completed_combinations}/{combination_count}"
+        )
+        padding = max(self._line_len - len(text), 0)
+        print("\r" + text + " " * padding, end="", flush=True)
+        self._line_len = len(text)
+
+    def clear(self) -> None:
+        if not self.enabled or self._line_len == 0:
+            return
+        print("\r" + " " * self._line_len + "\r", end="", flush=True)
+        self._line_len = 0
 
 
 @dataclass(frozen=True)
@@ -527,6 +659,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--log-interval", type=int, default=1024)
     parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Render a brief colorful progress bar. Defaults to on when stdout is a terminal.",
+    )
+    parser.add_argument(
         "--board-sizes",
         default=DEFAULT_BOARD_SIZES,
         help=f"Comma-separated board sizes. Default: {DEFAULT_BOARD_SIZES}.",
@@ -558,6 +696,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--saki-ko", default="", help="Override SAKIGo ko feature mapping.")
     parser.add_argument("--saki-suicide", default="", help="Override SAKIGo suicide feature mapping.")
     return parser.parse_args(argv)
+
+
+def progress_enabled(args: argparse.Namespace) -> bool:
+    if args.progress is not None:
+        return bool(args.progress)
+    return sys.stdout.isatty()
 
 
 def parse_board_sizes(raw: str) -> list[int]:
@@ -790,6 +934,7 @@ def run(argv: list[str] | None = None) -> None:
     next_game_id = args.concurrency
     completed_games = 0
     started_at = time.time()
+    progress = GenerationProgressBar(plan.target_samples, enabled=progress_enabled(args))
 
     def variant_for_game(game: Game) -> GenerationVariant:
         return GenerationVariant(board_size=game.board_size, ruleset=game.ruleset)
@@ -825,74 +970,99 @@ def run(argv: list[str] | None = None) -> None:
         send_or_reschedule(game)
     proc.stdin.flush()
 
-    with args.output.open("w", encoding="utf-8") as output:
-        while schedule.total_written < plan.target_samples:
-            if not pending:
-                raise RuntimeError("generation schedule exhausted before reaching target samples")
-            response = responses.get()
-            query_id = response.get("id")
-            game = pending.pop(str(query_id), None)
-            if game is None:
-                continue
-            variant = variant_for_game(game)
-            if "error" in response:
-                schedule.complete(variant, success=False)
-                proc.kill()
-                raise RuntimeError(
-                    "KataGo analysis error for "
-                    f"board_size={game.board_size}, ruleset={game.ruleset.metadata()}: "
-                    f"{response.get('error')}"
-                )
+    try:
+        with args.output.open("w", encoding="utf-8") as output:
+            while schedule.total_written < plan.target_samples:
+                if not pending:
+                    raise RuntimeError("generation schedule exhausted before reaching target samples")
+                response = responses.get()
+                query_id = response.get("id")
+                game = pending.pop(str(query_id), None)
+                if game is None:
+                    continue
+                variant = variant_for_game(game)
+                if "error" in response:
+                    schedule.complete(variant, success=False)
+                    proc.kill()
+                    raise RuntimeError(
+                        "KataGo analysis error for "
+                        f"board_size={game.board_size}, ruleset={game.ruleset.metadata()}: "
+                        f"{response.get('error')}"
+                    )
 
-            record, budget = record_from_response(game, response)
-            schedule.complete(variant, success=True)
-            output.write(json.dumps(record, separators=(",", ":")) + "\n")
+                record, budget = record_from_response(game, response)
+                schedule.complete(variant, success=True)
+                output.write(json.dumps(record, separators=(",", ":")) + "\n")
 
-            action = sample_action(budget, game.rng, args.temperature)
-            game.play(action)
-            can_continue = True
-            if game.should_reset(args.max_plies):
-                completed_games += 1
-                can_continue = reset_game(game)
+                action = sample_action(budget, game.rng, args.temperature)
+                game.play(action)
+                can_continue = True
+                if game.should_reset(args.max_plies):
+                    completed_games += 1
+                    can_continue = reset_game(game)
 
-            if can_continue and schedule.total_written < plan.target_samples:
-                send_or_reschedule(game)
-            if schedule.total_written % args.log_interval == 0 or schedule.total_written == plan.target_samples:
-                output.flush()
+                if can_continue and schedule.total_written < plan.target_samples:
+                    send_or_reschedule(game)
+
                 elapsed = max(1e-9, time.time() - started_at)
                 samples_per_second = schedule.total_written / elapsed
                 eta_seconds = max(0.0, (plan.target_samples - schedule.total_written) / samples_per_second)
-                status = {
-                    "state": "running" if schedule.total_written < plan.target_samples else "complete",
-                    "samples": schedule.total_written,
-                    "target_samples": plan.target_samples,
-                    "samples_per_second": samples_per_second,
-                    "eta_seconds": eta_seconds,
-                    "active_games": len(pending),
-                    "completed_games": completed_games,
-                    "output": str(args.output),
-                    "run_dir": str(args.run_dir),
-                    "quota_mode": plan.quota_mode,
-                    "samples_per_combination": plan.samples_per_combination,
-                    "combination_count": len(plan.variants),
-                    "rulesets": [ruleset.metadata() for ruleset in base_rulesets],
-                    "ruleset_variants": [variant.metadata() for variant in ruleset_variants],
-                    "board_sizes": board_sizes,
-                    "komis": komis,
-                    "completed_combinations": sum(
-                        1
-                        for key, quota in plan.quotas.items()
-                        if schedule.written[key] >= quota
-                    ),
-                    "updated_at": now_iso(),
-                }
-                write_status(args.status, status)
-                print(
-                    f"samples={schedule.total_written}/{plan.target_samples} "
-                    f"sps={samples_per_second:.2f} eta={eta_seconds / 60.0:.1f}m",
-                    flush=True,
+                completed_combinations = sum(
+                    1
+                    for key, quota in plan.quotas.items()
+                    if schedule.written[key] >= quota
                 )
-            proc.stdin.flush()
+                progress.render(
+                    samples=schedule.total_written,
+                    samples_per_second=samples_per_second,
+                    eta_seconds=eta_seconds,
+                    completed_combinations=completed_combinations,
+                    combination_count=len(plan.variants),
+                )
+                if schedule.total_written % args.log_interval == 0 or schedule.total_written == plan.target_samples:
+                    output.flush()
+                    status = {
+                        "state": "running" if schedule.total_written < plan.target_samples else "complete",
+                        "samples": schedule.total_written,
+                        "target_samples": plan.target_samples,
+                        "samples_per_second": samples_per_second,
+                        "eta_seconds": eta_seconds,
+                        "active_games": len(pending),
+                        "completed_games": completed_games,
+                        "output": str(args.output),
+                        "run_dir": str(args.run_dir),
+                        "quota_mode": plan.quota_mode,
+                        "samples_per_combination": plan.samples_per_combination,
+                        "combination_count": len(plan.variants),
+                        "rulesets": [ruleset.metadata() for ruleset in base_rulesets],
+                        "ruleset_variants": [variant.metadata() for variant in ruleset_variants],
+                        "board_sizes": board_sizes,
+                        "komis": komis,
+                        "completed_combinations": completed_combinations,
+                        "updated_at": now_iso(),
+                    }
+                    write_status(args.status, status)
+                    if progress.enabled:
+                        progress.render(
+                            samples=schedule.total_written,
+                            samples_per_second=samples_per_second,
+                            eta_seconds=eta_seconds,
+                            completed_combinations=completed_combinations,
+                            combination_count=len(plan.variants),
+                            force=schedule.total_written == plan.target_samples,
+                        )
+                    else:
+                        print(
+                            f"samples={schedule.total_written}/{plan.target_samples} "
+                            f"sps={samples_per_second:.2f} eta={eta_seconds / 60.0:.1f}m",
+                            flush=True,
+                        )
+                proc.stdin.flush()
+    finally:
+        if progress.enabled and schedule.total_written >= plan.target_samples:
+            print()
+        else:
+            progress.clear()
 
     proc.stdin.close()
     proc.wait(timeout=120)
