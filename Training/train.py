@@ -140,12 +140,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Mixed precision: auto/bf16 use bfloat16 autocast on CUDA, off disables it.",
     )
     parser.add_argument(
-        "--prefetch-batches",
-        type=int,
-        default=2,
-        help="Deprecated; DataLoader-backed streaming currently uses num_workers=0.",
-    )
-    parser.add_argument(
         "--cuda-graphs",
         action="store_true",
         help="Capture the train step in a CUDA graph (CUDA only, single board size, fixed batch).",
@@ -468,8 +462,6 @@ def _write_run_config(
 def _stream_buffer_bytes(args: argparse.Namespace) -> int:
     if args.stream_buffer_mb < 0.0:
         raise ValueError("--stream-buffer-mb must be non-negative")
-    if args.prefetch_batches < 0:
-        raise ValueError("--prefetch-batches must be non-negative")
     if args.stream_buffer_mb == 0.0:
         return 0
     byte_count = int(args.stream_buffer_mb * 1024 * 1024)
@@ -485,6 +477,103 @@ def _warn_deprecated_legacy_jsonl(data_paths: list[Path]) -> None:
             file=sys.stderr,
             flush=True,
         )
+
+
+def _run_training_loop(
+    args: argparse.Namespace,
+    device: torch.device,
+    boards: list[int],
+    model: torch.nn.Module,
+    model_config,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+    loss_weights: LossWeights,
+    amp_dtype: torch.dtype | None,
+    train_loader,
+    val_loader,
+    run_dir: Path,
+    metrics_path: Path,
+    start_step: int,
+    train_rng: random.Random,
+    val_rng: random.Random,
+) -> None:
+    """The single training loop shared by the streaming and eager data paths."""
+    early_eval_steps = step_set(args.early_eval_steps)
+    train_metrics = MetricAccumulator(loss_weights)
+    graphed_step = _make_graphed_step(args, device, boards, model, optimizer, loss_weights, amp_dtype)
+    train_iter = iter(train_loader)
+    val_iter = iter(val_loader)
+    progress = ProgressBar(args.steps, start_step, args.batch_size, _progress_enabled(args))
+    keeper = PinnedBatchKeeper(device.type == "cuda")
+    logged_loss = float("nan")
+    try:
+        for step in range(start_step + 1, args.steps + 1):
+            model.train()
+            cpu_batch = next(train_iter)
+            batch = batch_to_device(cpu_batch, device)
+            keeper.fence(cpu_batch)
+            if graphed_step is not None:
+                output, head_losses, loss = graphed_step.step(batch)
+            else:
+                output, head_losses, loss = _train_batch(
+                    model,
+                    optimizer,
+                    batch,
+                    loss_weights,
+                    args.grad_clip,
+                    amp_dtype,
+                )
+            train_metrics.add_batch(output, batch, head_losses, loss)
+            if scheduler is not None:
+                scheduler.step()
+            progress.render(step, logged_loss)
+
+            should_checkpoint = (
+                step in early_eval_steps
+                or step % args.checkpoint_interval == 0
+                or step == args.steps
+            )
+            should_log = (
+                step == 1
+                or step % args.log_interval == 0
+                or should_checkpoint
+                or step == args.steps
+            )
+            if should_checkpoint:
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    run_dir,
+                    step,
+                    args,
+                    model_config,
+                    train_rng,
+                    val_rng,
+                    scheduler=scheduler,
+                )
+            if should_log:
+                val_metrics = balanced_eval_loader(
+                    model,
+                    val_iter,
+                    device,
+                    args.loss_eval_batches,
+                    loss_weights,
+                    amp_dtype,
+                )
+                row: dict[str, float | int] = {
+                    "step": step,
+                    **prefixed("train", train_metrics.averages()),
+                    **prefixed("val", val_metrics.averages()),
+                }
+                logged_loss = float(row["train_loss"])
+                add_val_confusion(row, val_metrics)
+                append_metrics(metrics_path, row)
+                progress.clear()
+                print(progress_line(row), flush=True)
+                train_metrics.reset()
+    finally:
+        progress.clear()
+        keeper.release_all()
 
 
 def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
@@ -564,10 +653,6 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
             },
         )
 
-        early_eval_steps = step_set(args.early_eval_steps)
-        train_metrics = MetricAccumulator(loss_weights)
-        graphed_step = _make_graphed_step(args, device, boards, model, optimizer, loss_weights, amp_dtype)
-
         pin = device.type == "cuda"
         train_loader = make_batch_dataloader(
             StreamingRulesetAwareBatchDataset(
@@ -591,79 +676,24 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
             ),
             pin_memory=False,
         )
-        train_iter = iter(train_loader)
-        val_iter = iter(val_loader)
-        progress = ProgressBar(args.steps, start_step, args.batch_size, _progress_enabled(args))
-        keeper = PinnedBatchKeeper(device.type == "cuda")
-        logged_loss = float("nan")
-        try:
-            for step in range(start_step + 1, args.steps + 1):
-                model.train()
-                cpu_batch = next(train_iter)
-                batch = batch_to_device(cpu_batch, device)
-                keeper.fence(cpu_batch)
-                if graphed_step is not None:
-                    output, head_losses, loss = graphed_step.step(batch)
-                else:
-                    output, head_losses, loss = _train_batch(
-                        model,
-                        optimizer,
-                        batch,
-                        loss_weights,
-                        args.grad_clip,
-                        amp_dtype,
-                    )
-                train_metrics.add_batch(output, batch, head_losses, loss)
-                if scheduler is not None:
-                    scheduler.step()
-                progress.render(step, logged_loss)
-
-                should_checkpoint = (
-                    step in early_eval_steps
-                    or step % args.checkpoint_interval == 0
-                    or step == args.steps
-                )
-                should_log = (
-                    step == 1
-                    or step % args.log_interval == 0
-                    or should_checkpoint
-                    or step == args.steps
-                )
-                if should_checkpoint:
-                    save_checkpoint(
-                        model,
-                        optimizer,
-                        run_dir,
-                        step,
-                        args,
-                        model_config,
-                        train_rng,
-                        val_rng,
-                        scheduler=scheduler,
-                    )
-                if should_log:
-                    val_metrics = balanced_eval_loader(
-                        model,
-                        val_iter,
-                        device,
-                        args.loss_eval_batches,
-                        loss_weights,
-                        amp_dtype,
-                    )
-                    row: dict[str, float | int] = {
-                        "step": step,
-                        **prefixed("train", train_metrics.averages()),
-                        **prefixed("val", val_metrics.averages()),
-                    }
-                    logged_loss = float(row["train_loss"])
-                    add_val_confusion(row, val_metrics)
-                    append_metrics(metrics_path, row)
-                    progress.clear()
-                    print(progress_line(row), flush=True)
-                    train_metrics.reset()
-        finally:
-            progress.clear()
-            keeper.release_all()
+        _run_training_loop(
+            args,
+            device,
+            boards,
+            model,
+            model_config,
+            optimizer,
+            scheduler,
+            loss_weights,
+            amp_dtype,
+            train_loader,
+            val_loader,
+            run_dir,
+            metrics_path,
+            start_step,
+            train_rng,
+            val_rng,
+        )
 
     print(f"run_dir={run_dir}")
     print(f"metrics={metrics_path}")
@@ -726,10 +756,6 @@ def main(argv: list[str] | None = None) -> None:
         },
     )
 
-    early_eval_steps = step_set(args.early_eval_steps)
-    train_metrics = MetricAccumulator(loss_weights)
-    graphed_step = _make_graphed_step(args, device, boards, model, optimizer, loss_weights, amp_dtype)
-
     pin = device.type == "cuda"
     train_loader = make_batch_dataloader(
         RulesetAwareBatchDataset(
@@ -750,79 +776,24 @@ def main(argv: list[str] | None = None) -> None:
         ),
         pin_memory=False,
     )
-    train_iter = iter(train_loader)
-    val_iter = iter(val_loader)
-    progress = ProgressBar(args.steps, start_step, args.batch_size, _progress_enabled(args))
-    keeper = PinnedBatchKeeper(device.type == "cuda")
-    logged_loss = float("nan")
-    try:
-        for step in range(start_step + 1, args.steps + 1):
-            model.train()
-            cpu_batch = next(train_iter)
-            batch = batch_to_device(cpu_batch, device)
-            keeper.fence(cpu_batch)
-            if graphed_step is not None:
-                output, head_losses, loss = graphed_step.step(batch)
-            else:
-                output, head_losses, loss = _train_batch(
-                    model,
-                    optimizer,
-                    batch,
-                    loss_weights,
-                    args.grad_clip,
-                    amp_dtype,
-                )
-            train_metrics.add_batch(output, batch, head_losses, loss)
-            if scheduler is not None:
-                scheduler.step()
-            progress.render(step, logged_loss)
-
-            should_checkpoint = (
-                step in early_eval_steps
-                or step % args.checkpoint_interval == 0
-                or step == args.steps
-            )
-            should_log = (
-                step == 1
-                or step % args.log_interval == 0
-                or should_checkpoint
-                or step == args.steps
-            )
-            if should_checkpoint:
-                save_checkpoint(
-                    model,
-                    optimizer,
-                    run_dir,
-                    step,
-                    args,
-                    model_config,
-                    train_rng,
-                    val_rng,
-                    scheduler=scheduler,
-                )
-            if should_log:
-                val_metrics = balanced_eval_loader(
-                    model,
-                    val_iter,
-                    device,
-                    args.loss_eval_batches,
-                    loss_weights,
-                    amp_dtype,
-                )
-                row: dict[str, float | int] = {
-                    "step": step,
-                    **prefixed("train", train_metrics.averages()),
-                    **prefixed("val", val_metrics.averages()),
-                }
-                logged_loss = float(row["train_loss"])
-                add_val_confusion(row, val_metrics)
-                append_metrics(metrics_path, row)
-                progress.clear()
-                print(progress_line(row), flush=True)
-                train_metrics.reset()
-    finally:
-        progress.clear()
-        keeper.release_all()
+    _run_training_loop(
+        args,
+        device,
+        boards,
+        model,
+        model_config,
+        optimizer,
+        scheduler,
+        loss_weights,
+        amp_dtype,
+        train_loader,
+        val_loader,
+        run_dir,
+        metrics_path,
+        start_step,
+        train_rng,
+        val_rng,
+    )
 
     print(f"run_dir={run_dir}")
     print(f"metrics={metrics_path}")

@@ -2,6 +2,11 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-06 - Layered hashes; crash-safe infra; loop dedup
+
+- Verified hash semantics against KataGo source: repetition hash is rule-defined (positional superko = board only; captures would break superko since every cycle increases them); metadata belongs in a separate situation hash. Engine now has incremental 128-bit Zobrist `PositionHash` + metadata-aware `StateHash` (to-move, simple-ko, captures, rules/komi) via `GameState::state_hash()`. 16 engine tests.
+- Rebuild-lens robustness pass (manual, no subagents): atomic checkpoint saves, deduplicated the two identical training loops in train.py into `_run_training_loop`, fixed KataGo engine orphaning on generator exceptions, removed dead `--prefetch-batches`, atomic scan-cache writes. 52 pytest green. Details in [ScanResult.md](ScanResult.md) addendum.
+
 ## 2026-07-06 - Full verification scan; engine test gap fixed; verification skill
 
 - Ran a full scan (suites + three parallel module audits + manual re-derivation of findings); results in [ScanResult.md](ScanResult.md). Verdict: no production bugs; 4 of 5 audit findings were false positives (notably "positional superko needs side-to-move" — wrong by definition).

@@ -56,7 +56,11 @@ def save_checkpoint(
     }
     if scheduler is not None:
         payload["scheduler"] = scheduler.state_dict()
-    torch.save(payload, path)
+    # Write-then-rename so a crash mid-save cannot leave a truncated
+    # checkpoint at the final path for a later resume to trip over.
+    tmp_path = path.with_name(path.name + ".tmp")
+    torch.save(payload, tmp_path)
+    tmp_path.replace(path)
     return path
 
 

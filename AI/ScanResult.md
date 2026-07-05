@@ -1,5 +1,37 @@
 # Codebase Scan Result — 2026-07-06
 
+## Addendum (same day): hash layering + rebuild-lens robustness pass
+
+**Hash semantics verified against KataGo source** (`boardhistory.cpp getKoHash`):
+repetition hashes are rule-defined — positional superko = board only,
+situational = board ⊕ player; **capture counts never enter a repetition hash**
+(any cycle strictly increases them, so superko would never fire). Metadata
+belongs in the *separate* situation/TT hash (KataGo's
+`getSituationRulesAndKoHash`). Implemented accordingly: [hash.rs](../Engine/src/hash.rs)
+now has incremental 128-bit Zobrist `PositionHash` (superko) **plus**
+`StateHash` = position ⊕ to-move ⊕ simple-ko point ⊕ captures ⊕ rules/komi
+(TT/NN-cache key; captures included because SAKIGo's NN input has the capture
+diff). `GameState::state_hash()` exposes it. 16 engine tests pass.
+
+**Rebuild-lens robustness findings (fixed):**
+- `save_checkpoint` wrote `.pt` files non-atomically → truncated checkpoint on
+  crash mid-write; now write-tmp-then-rename ([checkpoints.py](../Training/checkpoints.py)).
+- [train.py](../Training/train.py) carried two byte-identical ~90-line training
+  loops (streaming + eager) — the top drift hazard in the file; extracted into
+  one shared `_run_training_loop`.
+- KataGo engine process was **orphaned on any generator exception** outside the
+  one handled analysis-error branch (shutdown sat after the `finally`); moved
+  close/wait/kill into the `finally` ([generate_katago_phase1.py](../Training/generate_katago_phase1.py)).
+- Dead `--prefetch-batches` no-op arg removed; scan-cache write made atomic.
+
+**Judged sound (checked, not changed):** generator `write_status` already
+atomic; scan-cache reader tolerates corruption and keys on
+size/mtime/seed/val_fraction/boards; stream handles closed via context
+manager; resume takes an explicit checkpoint path. **Rebuild notes, no action:**
+a rebuild would drop the eager data path entirely (now at least it shares the
+one loop) and bind the Rust engine into Python (PyO3) instead of the duplicated
+Python `Game` — both remain human decisions, tracked in Issues.
+
 Full verification scan against (and beyond) [ImplementationChecklist.md](ImplementationChecklist.md).
 Method: test suites first, then three parallel module audits (Engine, Model,
 Training), then manual re-verification of every reported finding.

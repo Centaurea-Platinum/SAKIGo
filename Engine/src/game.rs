@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 
 use crate::board::{Board, BoardError, Color, Point};
-use crate::hash::{hash_board, PositionHash};
+use crate::hash::{hash_board, hash_state, PositionHash, StateHash};
 use crate::rules::{KoRule, Ruleset, SuicideRule};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +73,7 @@ pub struct GameState {
     to_move: Color,
     captures: [usize; 2],
     simple_ko: Option<Point>,
+    position_hash: PositionHash,
     seen_positions: HashSet<PositionHash>,
     position_history: Vec<PositionHash>,
     move_number: usize,
@@ -92,6 +93,7 @@ impl GameState {
             to_move,
             captures,
             simple_ko: None,
+            position_hash: initial_hash,
             seen_positions: HashSet::from([initial_hash]),
             position_history: vec![initial_hash],
             move_number: 0,
@@ -126,6 +128,23 @@ impl GameState {
         self.captured_by(perspective) as isize - self.captured_by(perspective.opponent()) as isize
     }
 
+    pub fn position_hash(&self) -> PositionHash {
+        self.position_hash
+    }
+
+    /// Metadata-aware key for transposition tables and NN caches: position
+    /// plus side to move, simple-ko point, captures, and rules. Never used
+    /// for superko checks (those are rule-defined; see `PositionHash`).
+    pub fn state_hash(&self) -> StateHash {
+        hash_state(
+            self.position_hash,
+            self.to_move,
+            self.simple_ko,
+            self.captures,
+            &self.rules,
+        )
+    }
+
     pub fn position_history(&self) -> &[PositionHash] {
         &self.position_history
     }
@@ -154,7 +173,7 @@ impl GameState {
 
     fn pass(&mut self) -> MoveOutcome {
         let color = self.to_move;
-        let position_hash = hash_board(&self.board);
+        let position_hash = self.position_hash;
         self.simple_ko = None;
         self.seen_positions.insert(position_hash);
         self.position_history.push(position_hash);
@@ -179,6 +198,7 @@ impl GameState {
         self.captures[color.index()] += analysis.captured_opponent;
         self.captures[color.opponent().index()] += analysis.captured_self;
         self.simple_ko = analysis.next_simple_ko;
+        self.position_hash = analysis.position_hash;
         self.seen_positions.insert(analysis.position_hash);
         self.position_history.push(analysis.position_hash);
         self.to_move = color.opponent();
@@ -216,6 +236,7 @@ impl GameState {
             .set(point, Some(color))
             .expect("point was already checked to be in bounds");
 
+        let mut position_hash = self.position_hash.toggle_stone(color, point);
         let mut captured_points = Vec::new();
         for neighbor in self.board.neighbors(point) {
             if next_board.get(neighbor) != Some(opponent) {
@@ -230,6 +251,9 @@ impl GameState {
                 captured_points.extend(stones);
             }
         }
+        for &captured in &captured_points {
+            position_hash = position_hash.toggle_stone(opponent, captured);
+        }
 
         let mut self_captured_points = Vec::new();
         if next_board.get(point) == Some(color) {
@@ -242,10 +266,12 @@ impl GameState {
                 }
                 self_captured_points = own_group.stones().to_vec();
                 next_board.remove_points(&self_captured_points);
+                for &captured in &self_captured_points {
+                    position_hash = position_hash.toggle_stone(color, captured);
+                }
             }
         }
 
-        let position_hash = hash_board(&next_board);
         if self.rules.ko == KoRule::PositionalSuperKo
             && self.seen_positions.contains(&position_hash)
         {
@@ -315,23 +341,12 @@ mod tests {
 
     #[test]
     fn play_captures_adjacent_group() {
-        let mut state = GameState::new(3, simple_rules()).unwrap();
-        state
-            .board
-            .set(Point::new(0, 1), Some(Color::White))
-            .unwrap();
-        state
-            .board
-            .set(Point::new(0, 2), Some(Color::Black))
-            .unwrap();
-        state
-            .board
-            .set(Point::new(1, 0), Some(Color::Black))
-            .unwrap();
-        state
-            .board
-            .set(Point::new(1, 1), Some(Color::Black))
-            .unwrap();
+        let mut board = Board::new(3).unwrap();
+        board.set(Point::new(0, 1), Some(Color::White)).unwrap();
+        board.set(Point::new(0, 2), Some(Color::Black)).unwrap();
+        board.set(Point::new(1, 0), Some(Color::Black)).unwrap();
+        board.set(Point::new(1, 1), Some(Color::Black)).unwrap();
+        let mut state = GameState::from_board(board, simple_rules(), Color::Black, [0, 0]);
 
         let outcome = state.play(GoMove::Play(Point::new(0, 0))).unwrap();
         assert_eq!(outcome.captured_opponent, 1);
@@ -453,6 +468,30 @@ mod tests {
         assert_eq!(state.to_move(), Color::White);
         let outcome = state.play(GoMove::Play(Point::new(1, 2))).unwrap();
         assert_eq!(outcome.captured_opponent, 1);
+    }
+
+    #[test]
+    fn incremental_hash_matches_full_recompute_through_captures() {
+        let rules = Ruleset::new(
+            ScoringRule::Area,
+            KoRule::PositionalSuperKo,
+            SuicideRule::Allowed,
+            7.5,
+        );
+        let mut state = GameState::new(3, rules).unwrap();
+        let moves = [
+            GoMove::Play(Point::new(0, 1)), // B
+            GoMove::Play(Point::new(0, 0)), // W (will be captured)
+            GoMove::Play(Point::new(1, 0)), // B captures W(0,0)
+            GoMove::Play(Point::new(2, 2)), // W
+            GoMove::Pass,                   // B
+            GoMove::Play(Point::new(2, 1)), // W
+        ];
+        for go_move in moves {
+            let outcome = state.play(go_move).unwrap();
+            assert_eq!(state.position_hash(), hash_board(state.board()));
+            assert_eq!(outcome.position_hash, state.position_hash());
+        }
     }
 
     #[test]

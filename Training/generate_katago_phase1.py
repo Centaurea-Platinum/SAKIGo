@@ -1179,9 +1179,17 @@ def run(argv: list[str] | None = None) -> None:
             print()
         else:
             progress.clear()
-
-    proc.stdin.close()
-    proc.wait(timeout=120)
+        # Engine shutdown must run on every exit path (including writer
+        # errors and Ctrl+C), or the KataGo process is orphaned.
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=30)
 
 
 def main() -> None:

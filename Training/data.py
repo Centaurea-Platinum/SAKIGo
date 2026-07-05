@@ -486,7 +486,9 @@ def scan_jsonl_stream_metadata(
             },
         }
         try:
-            cache_path.write_text(json.dumps(cached), encoding="utf-8")
+            tmp_path = cache_path.with_name(cache_path.name + ".tmp")
+            tmp_path.write_text(json.dumps(cached), encoding="utf-8")
+            tmp_path.replace(cache_path)
         except OSError:
             pass
     return metadata

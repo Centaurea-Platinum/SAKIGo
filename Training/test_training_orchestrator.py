@@ -716,8 +716,6 @@ def test_train_only_logs_on_log_steps(tmp_path: Path) -> None:
             "0.25",
             "--seed",
             "3",
-            "--prefetch-batches",
-            "0",
         ]
     )
 
