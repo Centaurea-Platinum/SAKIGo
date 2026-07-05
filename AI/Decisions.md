@@ -84,9 +84,9 @@ Two *retained* scalars in [−1, 1], divided by board **area** (matching the sco
 
 Budget head = search prior; policy head = an extra reward signal predicting the best move (variants PolicyWinrate, PolicyScore). Pass is represented as one additional logit beside the n^2 board-move logits; board moves plus pass enter the same softmax. **Why:** decouples "where to search" from "what is best," while keeping pass normalized with the legal action distribution instead of as an isolated scalar. Loss construction is deferred to the training phase. Source: [Policy+Budget.md](../Design/Output/Policy+Budget.md); human clarification 2026-07-03.
 
-## D6 — Win / Loss / Draw as a length-3 vector
+## D6 - Win / Draw / Loss / No-result as a length-4 vector
 
-**Why:** draws are reachable (SimpleKo long-repeat = draw, per [NonBoardInput.md](../Design/Input/NonBoardInput.md)), so winrate cannot collapse to a single scalar. Source: [Winrate.md](../Design/Output/Winrate.md).
+**Current correction (2026-07-05):** the WDL head is length 4: win, draw, loss, and no-result. **Why:** draws are reachable (SimpleKo long-repeat = draw, per [NonBoardInput.md](../Design/Input/NonBoardInput.md)), so winrate cannot collapse to a single scalar; KataGo analysis also exposes no-result probability, so the Phase 1 target keeps it as an explicit class. Source: [Winrate.md](../Design/Output/Winrate.md), [common.py](../Training/common.py), [HeadShapes.md](../Design/ModelSpecs/HeadShapes.md).
 
 ## D7 — Score: scalar first, percentile heads later
 

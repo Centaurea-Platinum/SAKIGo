@@ -60,7 +60,7 @@ Keep the AI notes current without waiting to be prompted: when code, design docs
 
 **Output - the heads**
 - [SpatialGlobalDistinction.md](../Design/Output/SpatialGlobalDistinction.md) - spatial heads are board-shaped; global heads are spatial-independent register outputs.
-- [Winrate.md](../Design/Output/Winrate.md) - length-3 win/draw/loss output.
+- [Winrate.md](../Design/Output/Winrate.md) - length-4 win/draw/loss/no-result output.
 - [Score.md](../Design/Output/Score.md) - scalar score divided by board area first; percentile heads later.
 - [Ownership.md](../Design/Output/Ownership.md) - end-of-game ownership.
 - [Policy+Budget.md](../Design/Output/Policy+Budget.md) - policy and budget are separate targets; pass is the final logit in the shared `N*N + 1` action vector. Current design says train without masking illegal moves and mask them only as an inference precaution.

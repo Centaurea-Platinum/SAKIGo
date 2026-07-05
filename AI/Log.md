@@ -2,6 +2,25 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-06 - Full verification scan; engine test gap fixed; verification skill
+
+- Ran a full scan (suites + three parallel module audits + manual re-derivation of findings); results in [ScanResult.md](ScanResult.md). Verdict: no production bugs; 4 of 5 audit findings were false positives (notably "positional superko needs side-to-move" — wrong by definition).
+- Fixed the one real gap: added 4 engine tests (positional superko repetition, initial-position superko on 1x1, pass semantics incl. ko clearing, multi-group capture). `cargo test` 12 passed; pytest 52 passed.
+- Added `.github/skills/verification/SKILL.md`: evidence-driven verification procedure (discriminating tests over checklist ceremony) with SAKIGo invariants and past-incident lessons.
+
+## 2026-07-05 - Audited implementation against checklist
+
+- Scanned the current engine, model, training/data, KataGo generator, self-play eval, specs, tests, and project notes against [ImplementationChecklist.md](ImplementationChecklist.md).
+- Verification: `uv run --frozen pytest` passed (`52 passed`), and `cargo test` in `Engine/` passed (`8 passed`).
+- Corrected stale AI memory: WDL is now length 4 (win/draw/loss/no-result), matching design, model specs, generator, trainer, and tests.
+- Added a watchlist risk: Phase 1 generator legality is duplicated in Python and currently differs from the Rust engine around allowed single-stone suicide.
+
+## 2026-07-05 - Completed implementation checklist
+
+- Expanded [ImplementationChecklist.md](ImplementationChecklist.md) from a rough seed into a practical implementation/review rubric.
+- Covered correctness, source-of-truth boundaries, robustness, ML/training-specific traps, performance, tests, AI-note maintenance, and final-diff checks.
+- Scope stayed inside `AI/`; no code or design sources changed.
+
 ## 2026-07-05 - Switched training data to DataLoader-backed zstd shards
 
 - Added zstd JSONL support in [data.py](../Training/data.py): `.jsonl.zst` readers/writers, shard-directory/glob expansion, and format labels. Plain `.jsonl` remains readable but is treated as deprecated for training data.

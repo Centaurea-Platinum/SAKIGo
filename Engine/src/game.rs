@@ -378,6 +378,100 @@ mod tests {
     }
 
     #[test]
+    fn positional_superko_blocks_board_repetition() {
+        let rules = Ruleset::new(
+            ScoringRule::Area,
+            KoRule::PositionalSuperKo,
+            SuicideRule::Forbidden,
+            7.5,
+        );
+        let mut board = Board::new(4).unwrap();
+        board.set(Point::new(0, 1), Some(Color::White)).unwrap();
+        board.set(Point::new(1, 0), Some(Color::White)).unwrap();
+        board.set(Point::new(1, 2), Some(Color::White)).unwrap();
+        board.set(Point::new(2, 1), Some(Color::White)).unwrap();
+        board.set(Point::new(0, 2), Some(Color::Black)).unwrap();
+        board.set(Point::new(1, 3), Some(Color::Black)).unwrap();
+        board.set(Point::new(2, 2), Some(Color::Black)).unwrap();
+        let mut state = GameState::from_board(board, rules, Color::Black, [0, 0]);
+
+        let outcome = state.play(GoMove::Play(Point::new(1, 1))).unwrap();
+        assert_eq!(outcome.captured_opponent, 1);
+        // White's recapture would recreate the initial board position.
+        assert_eq!(
+            state.would_be_legal(Point::new(1, 2)),
+            Err(IllegalMove::SuperKo {
+                point: Point::new(1, 2)
+            })
+        );
+    }
+
+    #[test]
+    fn superko_counts_initial_position() {
+        let rules = Ruleset::new(
+            ScoringRule::Area,
+            KoRule::PositionalSuperKo,
+            SuicideRule::Allowed,
+            7.5,
+        );
+        let state = GameState::new(1, rules).unwrap();
+        // On 1x1 the first stone is an allowed single-stone suicide, which
+        // would recreate the empty initial board: a repeated position.
+        assert_eq!(
+            state.would_be_legal(Point::new(0, 0)),
+            Err(IllegalMove::SuperKo {
+                point: Point::new(0, 0)
+            })
+        );
+    }
+
+    #[test]
+    fn pass_clears_simple_ko_and_updates_state() {
+        let mut board = Board::new(4).unwrap();
+        board.set(Point::new(0, 1), Some(Color::White)).unwrap();
+        board.set(Point::new(1, 0), Some(Color::White)).unwrap();
+        board.set(Point::new(1, 2), Some(Color::White)).unwrap();
+        board.set(Point::new(2, 1), Some(Color::White)).unwrap();
+        board.set(Point::new(0, 2), Some(Color::Black)).unwrap();
+        board.set(Point::new(1, 3), Some(Color::Black)).unwrap();
+        board.set(Point::new(2, 2), Some(Color::Black)).unwrap();
+        let mut state = GameState::from_board(board, simple_rules(), Color::Black, [0, 0]);
+
+        state.play(GoMove::Play(Point::new(1, 1))).unwrap();
+        assert_eq!(state.simple_ko_point(), Some(Point::new(1, 2)));
+        let move_number = state.move_number();
+        let hash_before = *state.position_history().last().unwrap();
+
+        let outcome = state.play(GoMove::Pass).unwrap();
+        assert_eq!(outcome.position_hash, hash_before);
+        assert_eq!(state.simple_ko_point(), None);
+        assert_eq!(state.to_move(), Color::Black);
+        assert_eq!(state.move_number(), move_number + 1);
+
+        state.play(GoMove::Pass).unwrap();
+        // With the ko cleared by the passes, White may now recapture.
+        assert_eq!(state.to_move(), Color::White);
+        let outcome = state.play(GoMove::Play(Point::new(1, 2))).unwrap();
+        assert_eq!(outcome.captured_opponent, 1);
+    }
+
+    #[test]
+    fn one_move_captures_multiple_groups() {
+        let mut board = Board::new(3).unwrap();
+        board.set(Point::new(0, 0), Some(Color::White)).unwrap();
+        board.set(Point::new(0, 2), Some(Color::White)).unwrap();
+        board.set(Point::new(1, 0), Some(Color::Black)).unwrap();
+        board.set(Point::new(1, 2), Some(Color::Black)).unwrap();
+        let mut state = GameState::from_board(board, simple_rules(), Color::Black, [0, 0]);
+
+        let outcome = state.play(GoMove::Play(Point::new(0, 1))).unwrap();
+        assert_eq!(outcome.captured_opponent, 2);
+        assert_eq!(state.board().get(Point::new(0, 0)), None);
+        assert_eq!(state.board().get(Point::new(0, 2)), None);
+        assert_eq!(state.captured_by(Color::Black), 2);
+    }
+
+    #[test]
     fn simple_ko_blocks_immediate_recapture() {
         let mut board = Board::new(4).unwrap();
         board.set(Point::new(0, 1), Some(Color::White)).unwrap();
