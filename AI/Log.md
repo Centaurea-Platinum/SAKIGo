@@ -2,6 +2,11 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-06 - Simplification pass + HTML pipeline viewer
+
+- Cut non-standard/stale machinery (-366 lines net): CUDA-graphs train-step capture (`graph_step.py`, `--cuda-graphs`, capturable-AdamW branches — measured ~3% at batch 128; inference has its own graph path in `SakiGoInference`), eager sampling remnants orphaned by streaming-only training (`RulesetAwareBatchDataset`, module-level `sample_ruleset_aware_batch`, `build_ruleset_groups`, `split_records`, `filter_records_by_boards`, `StreamingJsonlBuffer.sample_batch` + its pop path), and the speculative `prettyterm` adapter (plain ANSI now; also fixed progress-bar padding counting invisible escape codes). Kept: `load_records`/`build_groups`/`sample_batch` (suite sweep), both streaming sampling engines (offset index for plain jsonl, eviction buffer for zst — each is the only option for its format). The without-replacement test now runs on zst so it exercises the buffer path. 51 pytest green.
+- Added [Viewer/pipeline_viewer.html](../Viewer/pipeline_viewer.html): single-file offline viewer (no server, no deps). Tabs: clickable pipeline map (generation/training/eval lanes with per-node invariants), record inspector (plain `.jsonl`: composite board, 6 planes, budget/policy/ownership/legal-mask heatmaps, WDL bar, decoded rule features), metrics.csv plotter (column toggles, log-y), status.json summary. Verified in-browser against real run artifacts; incidentally confirmed val now tracks train (13.2→6.4 over 18.6k steps) in the post-cache-fix suite run.
+
 ## 2026-07-06 - Rebuild improvements: suicide semantics, eager path removed, PyO3 parked
 
 - Owner asked to implement the proposed improvements and was away; proceeded autonomously in stages.
