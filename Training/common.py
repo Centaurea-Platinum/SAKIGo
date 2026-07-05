@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 1
 BOARD_PLANE_COUNT = 6
 RULE_FEATURE_COUNT = 10
-WDL_LABELS = ("win", "draw", "loss")
+WDL_LABELS = ("win", "draw", "loss", "no_result")
 HEADS = ("wdl", "score", "ownership", "policy", "budget")
 ACTION_HEADS = ("policy", "budget")
 
@@ -24,7 +24,7 @@ class TrainingRecord:
     """One training position. Array fields are numpy-backed for cheap collation.
 
     board_planes: float32 [BOARD_PLANE_COUNT, n, n]; rule_features: float32 [RULE_FEATURE_COUNT];
-    wdl: float32 [3]; ownership: float32 [n*n]; policy/budget: float32 [n*n+1] distributions;
+    wdl: float32 [4]; ownership: float32 [n*n]; policy/budget: float32 [n*n+1] distributions;
     legal_mask: bool [n*n+1].
     """
 
@@ -34,6 +34,8 @@ class TrainingRecord:
     position_key: str
     board_planes: np.ndarray
     rule_features: np.ndarray
+    ruleset_key: str = ""
+    ruleset: dict[str, object] | None = None
     wdl: np.ndarray | None = None
     score: float | None = None
     ownership: np.ndarray | None = None
@@ -115,4 +117,3 @@ def make_run_dir(raw: str, resume_path: str | Path | None = None) -> Path:
         path = ROOT / "Training" / "runs" / datetime.now().strftime("%Y%m%d_%H%M%S")
     path.mkdir(parents=True, exist_ok=True)
     return path
-

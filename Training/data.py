@@ -19,6 +19,12 @@ from .common import (
     RULE_FEATURE_COUNT,
     SCHEMA_VERSION,
     TrainingRecord,
+    WDL_LABELS,
+)
+from .rulesets import (
+    ruleset_from_metadata,
+    ruleset_key_from_raw,
+    validate_rule_features,
 )
 
 
@@ -84,6 +90,18 @@ def _optional_legal_mask(source: Mapping[str, Any], expected: int) -> np.ndarray
     return np.asarray(raw, dtype=bool)
 
 
+def _record_ruleset(raw: Mapping[str, Any]) -> dict[str, object] | None:
+    ruleset_raw = raw.get("ruleset")
+    if ruleset_raw is None:
+        source = raw.get("source")
+        if isinstance(source, Mapping):
+            legacy_rules = source.get("rules")
+            if isinstance(legacy_rules, str):
+                ruleset_raw = legacy_rules
+    ruleset = ruleset_from_metadata(ruleset_raw)
+    return ruleset.metadata() if ruleset is not None else None
+
+
 def record_from_json(raw: Mapping[str, Any], path: Path | None = None, line_number: int = 0) -> TrainingRecord:
     label = f"{path}:{line_number}" if path is not None and line_number else "record"
     try:
@@ -110,6 +128,9 @@ def record_from_json(raw: Mapping[str, Any], path: Path | None = None, line_numb
     board_planes = _float_array(raw.get("board_planes"), BOARD_PLANE_COUNT * area, "board_planes")
     board_planes = board_planes.reshape(BOARD_PLANE_COUNT, board_size, board_size)
     rule_features = _float_array(raw.get("rule_features"), RULE_FEATURE_COUNT, "rule_features")
+    ruleset = _record_ruleset(raw)
+    parsed_ruleset = ruleset_from_metadata(ruleset)
+    validate_rule_features(rule_features, parsed_ruleset)
     ownership = _optional_vector(targets, "ownership", area)
     if ownership is not None and ((ownership < -1.0) | (ownership > 1.0)).any():
         raise ValueError("ownership values must be in [-1, 1]")
@@ -122,7 +143,9 @@ def record_from_json(raw: Mapping[str, Any], path: Path | None = None, line_numb
         position_key=position_key,
         board_planes=board_planes,
         rule_features=rule_features,
-        wdl=_optional_distribution(targets, "wdl", 3),
+        ruleset_key=ruleset_key_from_raw(ruleset),
+        ruleset=ruleset,
+        wdl=_optional_distribution(targets, "wdl", len(WDL_LABELS)),
         score=_optional_score(targets),
         ownership=ownership,
         policy=_optional_distribution(targets, "policy", action_count),
@@ -156,6 +179,7 @@ class JsonlStreamMetadata:
     train_count: int
     val_count: int
     board_counts: dict[int, int]
+    ruleset_counts: dict[str, int]
 
     @property
     def board_sizes(self) -> list[int]:
@@ -184,18 +208,19 @@ def split_for_position(
     position_key: str,
     val_fraction: float,
     seed: int,
+    ruleset_key: str = "",
 ) -> str:
     if not 0.0 <= val_fraction < 1.0:
         raise ValueError("val_fraction must be in [0, 1)")
     if val_fraction == 0.0:
         return TRAIN_SPLIT
-    key = f"{seed}:{board_size}:{position_key}".encode("utf-8")
+    key = f"{seed}:{board_size}:{ruleset_key}:{position_key}".encode("utf-8")
     value = int.from_bytes(blake2b(key, digest_size=8).digest(), byteorder="big")
     fraction = value / float(1 << 64)
     return VAL_SPLIT if fraction < val_fraction else TRAIN_SPLIT
 
 
-def _line_board_and_position(line: str, path: Path, line_number: int) -> tuple[int, str]:
+def _line_board_position_and_ruleset(line: str, path: Path, line_number: int) -> tuple[int, str, str]:
     label = f"{path}:{line_number}"
     try:
         raw = json.loads(line)
@@ -207,7 +232,7 @@ def _line_board_and_position(line: str, path: Path, line_number: int) -> tuple[i
         raise ValueError(f"{label} board_size must be positive")
     if not position_key:
         raise ValueError(f"{label} position_key must be non-empty")
-    return board_size, position_key
+    return board_size, position_key, ruleset_key_from_raw(_record_ruleset(raw))
 
 
 def scan_jsonl_stream_metadata(
@@ -241,8 +266,13 @@ def scan_jsonl_stream_metadata(
                     train_count=int(entry["train_count"]),
                     val_count=int(entry["val_count"]),
                     board_counts={int(size): int(count) for size, count in entry["board_counts"].items()},
+                    ruleset_counts={
+                        str(ruleset): int(count)
+                        for ruleset, count in entry.get("ruleset_counts", {"": entry["record_count"]}).items()
+                    },
                 )
     board_counts: dict[int, int] = {}
+    ruleset_counts: dict[str, int] = {}
     record_count = 0
     train_count = 0
     val_count = 0
@@ -254,12 +284,23 @@ def scan_jsonl_stream_metadata(
                 stripped = line.strip()
                 if not stripped:
                     continue
-                board_size, position_key = _line_board_and_position(stripped, path, line_number)
+                board_size, position_key, ruleset_key = _line_board_position_and_ruleset(
+                    stripped,
+                    path,
+                    line_number,
+                )
                 if board_filter is not None and board_size not in board_filter:
                     continue
-                split = split_for_position(board_size, position_key, val_fraction, seed)
+                split = split_for_position(
+                    board_size,
+                    position_key,
+                    val_fraction,
+                    seed,
+                    ruleset_key,
+                )
                 record_count += 1
                 board_counts[board_size] = board_counts.get(board_size, 0) + 1
+                ruleset_counts[ruleset_key] = ruleset_counts.get(ruleset_key, 0) + 1
                 if split == VAL_SPLIT:
                     val_count += 1
                 else:
@@ -271,6 +312,7 @@ def scan_jsonl_stream_metadata(
         train_count=train_count,
         val_count=val_count,
         board_counts=board_counts,
+        ruleset_counts=ruleset_counts,
     )
     if cache_path is not None and cache_key is not None:
         try:
@@ -282,6 +324,7 @@ def scan_jsonl_stream_metadata(
             "train_count": metadata.train_count,
             "val_count": metadata.val_count,
             "board_counts": {str(size): count for size, count in metadata.board_counts.items()},
+            "ruleset_counts": metadata.ruleset_counts,
         }
         try:
             cache_path.write_text(json.dumps(cached), encoding="utf-8")
@@ -513,7 +556,13 @@ class StreamingJsonlBuffer:
             record = record_from_json(json.loads(stripped), path, line_number)
             if record.board_size not in self.boards:
                 continue
-            split = split_for_position(record.board_size, record.position_key, self.val_fraction, self.seed)
+            split = split_for_position(
+                record.board_size,
+                record.position_key,
+                self.val_fraction,
+                self.seed,
+                record.ruleset_key,
+            )
             if allowed_splits is not None and split not in allowed_splits:
                 continue
             return BufferedJsonlRecord(
@@ -604,9 +653,12 @@ def split_records(
 ) -> tuple[list[TrainingRecord], list[TrainingRecord]]:
     if not 0.0 <= val_fraction < 1.0:
         raise ValueError("val_fraction must be in [0, 1)")
-    by_position: dict[tuple[int, str], list[TrainingRecord]] = {}
+    by_position: dict[tuple[int, str, str], list[TrainingRecord]] = {}
     for record in records:
-        by_position.setdefault((record.board_size, record.position_key), []).append(record)
+        by_position.setdefault(
+            (record.board_size, record.ruleset_key, record.position_key),
+            [],
+        ).append(record)
     positions = list(by_position)
     rng.shuffle(positions)
     val_count = int(len(positions) * val_fraction)
@@ -678,7 +730,7 @@ def collate_cpu(records: list[TrainingRecord], pin_memory: bool = False) -> dict
         "ply": torch.tensor([record.ply for record in records], dtype=torch.long),
     }
 
-    for key, width in (("wdl", 3), ("ownership", area), ("policy", action_count), ("budget", action_count)):
+    for key, width in (("wdl", len(WDL_LABELS)), ("ownership", area), ("policy", action_count), ("budget", action_count)):
         values, mask = _stack_optional(records, key, width)
         batch[f"{key}_target"] = torch.from_numpy(values)
         batch[f"{key}_mask"] = torch.from_numpy(mask)

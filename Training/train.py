@@ -513,6 +513,7 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
                     "train_count": metadata.train_count,
                     "val_count": metadata.val_count,
                     "board_counts": {str(key): value for key, value in metadata.board_counts.items()},
+                    "ruleset_counts": metadata.ruleset_counts,
                 },
                 "stream_buffer": stream.stats(),
             },

@@ -161,8 +161,8 @@ class ScalarSakiGoModel(nn.Module):
         ):
             if outputs != 1:
                 raise ValueError(f"{label} must be 1")
-        if self.config.wdl_outputs != 3:
-            raise ValueError("wdl_outputs must be 3")
+        if self.config.wdl_outputs != 4:
+            raise ValueError("wdl_outputs must be 4")
         broadcast_blocks = set(self.config.broadcast_blocks)
         gather_blocks = self._gather_blocks()
         if not gather_blocks:

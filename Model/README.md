@@ -28,7 +28,7 @@ Inputs:
 
 Outputs:
 
-- `wdl_logits`: `[B, 3]`
+- `wdl_logits`: `[B, 4]`
 - `score`: `[B, 1]`
 - `ownership_logits`: `[B, N*N]`
 - `policy_logits`: `[B, N*N + 1]`, with pass at the final index

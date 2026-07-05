@@ -10,10 +10,10 @@
   "head_shapes": {
     "standard_v1": {
       "spatial_shape": ["expanded_channel", "expanded_channel", 8, "output"],
-      "global_shape": ["expanded_channel * register_count", "expanded_channel * register_count", 8, "output"],
+      "global_shape": ["expanded_channel * register_count", "expanded_channel * register_count / 2", 8, "output"],
       "collapse": "mean_d4_axis",
       "global_heads": {
-        "wdl": 3,
+        "wdl": 4,
         "score": 1,
         "pass_policy": 1,
         "pass_budget": 1

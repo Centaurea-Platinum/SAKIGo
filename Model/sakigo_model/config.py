@@ -24,7 +24,7 @@ class SakiGoModelConfig:
     gather_blocks: tuple[int, ...] | None = None
     broadcast_blocks: tuple[int, ...] = (5,)
     wdl_hidden: int = 8
-    wdl_outputs: int = 3
+    wdl_outputs: int = 4
     wdl_channels: tuple[int, ...] | None = None
     score_hidden: int = 8
     score_outputs: int = 1

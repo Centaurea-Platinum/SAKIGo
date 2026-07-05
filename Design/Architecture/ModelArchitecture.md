@@ -16,7 +16,7 @@ The trunk will be a bottlenecked nested residual setup with register tokens. Eac
 
     Residual constant {alpha_1, alpha_2, beta, gamma_1} are independent in each block, initialize to 1/sqrt(2*Block_count). gamma_2 exists only in the final broadcast block and uses the same initialization.
 
-Global heads (win/loss/draw) will be a D4-regular MLP applied to the merged register tokens, then collapsed to invariant logits by averaging over the D4 axis.
+Global heads (win/draw/loss/no-result) will be a D4-regular MLP applied to the merged register tokens, then collapsed to invariant logits by averaging over the D4 axis.
 
 Spatial heads (policy) will be D4-regular equivariant fiber MLPs, then collapsed to invariant policy logits by averaging over the D4 axis.
 

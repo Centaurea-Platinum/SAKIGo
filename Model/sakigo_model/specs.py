@@ -132,11 +132,23 @@ def _resolve_int(value: Any, context: dict[str, int], label: str) -> int:
             return int(context[raw])
         if raw.lstrip("-").isdigit():
             return int(raw)
-        if "*" in raw:
-            product = 1
-            for part in raw.split("*"):
-                product *= _resolve_int(part.strip(), context, label)
-            return product
+        if "*" in raw or "/" in raw:
+            parts = raw.replace("*", " * ").replace("/", " / ").split()
+            result = _resolve_int(parts[0], context, label)
+            for index in range(1, len(parts), 2):
+                if index + 1 >= len(parts):
+                    raise ValueError(f"{label} has incomplete channel expression {value!r}")
+                operator = parts[index]
+                rhs = _resolve_int(parts[index + 1], context, label)
+                if operator == "*":
+                    result *= rhs
+                elif operator == "/":
+                    if rhs == 0 or result % rhs != 0:
+                        raise ValueError(f"{label} has non-integral channel expression {value!r}")
+                    result //= rhs
+                else:
+                    raise ValueError(f"{label} has unsupported channel operator {operator!r}")
+            return result
         if raw not in context:
             available = ", ".join(sorted(context))
             raise ValueError(f"{label} references unknown channel {value!r}; available: {available}")

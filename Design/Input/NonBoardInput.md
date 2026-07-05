@@ -8,7 +8,7 @@ Scoring:
     (1) Area
     (2) Area + AncientChinese   #Penalized 2 points for each unconnected piece of alive group
     (3) Territory
-    (4) TerritoryWithSekiScore  #Stones in seki do not have territory points, but they can
+    (4) TerritoryWithSekiScore  #Stones in seki do not have territory points in tournament rulesets like japanese rules, but its trivial to add them
 
 Ko:
     (1) SimpleKo    #long repeat = draw

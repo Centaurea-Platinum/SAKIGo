@@ -422,7 +422,7 @@ def test_full_model_shapes_and_equivariance() -> None:
     board, rules = random_inputs()
     with torch.no_grad():
         base = model(board, rules)
-        assert base["wdl_logits"].shape == (2, 3)
+        assert base["wdl_logits"].shape == (2, 4)
         assert base["score"].shape == (2, 1)
         assert base["ownership_logits"].shape == (2, 25)
         assert base["policy_logits"].shape == (2, 26)
@@ -487,15 +487,17 @@ def test_model_specs_build_expected_config() -> None:
     assert config.bottleneck_channels == 16
     assert config.head_dim == 8
     assert config.rule_mlp_channels == (10, 32, 64, 64)
-    assert config.wdl_channels == (64, 64, 8, 3)
+    assert config.wdl_channels == (64, 32, 8, 4)
     assert config.policy_channels == (32, 32, 8, 1)
-    assert config.policy_pass_channels == (64, 64, 8, 1)
+    assert config.policy_pass_channels == (64, 32, 8, 1)
     assert config.policy_pass_outputs == 1
     model2 = config_from_spec("model2")
     assert model2.trunk_channels == 128
     assert model2.expanded_channel == 128
     assert model2.bottleneck_channels == 64
-    assert model2.head_dim == 16
+    assert model2.q_heads == 2
+    assert model2.kv_heads == 1
+    assert model2.head_dim == 32
     assert isinstance(model_from_spec("model1"), SakiGoModel)
     assert ScalarSakiGoModel().config.architecture == "ScalarSakiGoModel"
 
@@ -526,7 +528,7 @@ def test_scalar_control_forward_shapes() -> None:
     board, rules = random_inputs()
     with torch.no_grad():
         output = model(board, rules)
-    assert output["wdl_logits"].shape == (2, 3)
+    assert output["wdl_logits"].shape == (2, 4)
     assert output["score"].shape == (2, 1)
     assert output["ownership_logits"].shape == (2, 25)
     assert output["policy_logits"].shape == (2, 26)
