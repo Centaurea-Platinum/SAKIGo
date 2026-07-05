@@ -140,7 +140,7 @@ def benchmark_spec_batch(
         config = config_from_spec(spec, board_size=board_size)
         model = model_from_config(config).to(device)
         model.train()
-        optimizer_args = argparse.Namespace(lr=lr, weight_decay=weight_decay, cuda_graphs=False)
+        optimizer_args = argparse.Namespace(lr=lr, weight_decay=weight_decay)
         optimizer = _make_optimizer(model, optimizer_args, device)
         loss_weights = LossWeights()
         batch = collate(sample_batch(groups, batch_size, rng), device)

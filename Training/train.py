@@ -45,7 +45,6 @@ from Training.data import (  # noqa: E402
     make_batch_dataloader,
     scan_jsonl_stream_metadata,
 )
-from Training.graph_step import GraphedTrainStep  # noqa: E402
 from Training.losses import LossWeights, compute_head_losses, weighted_total_loss  # noqa: E402
 from Training.metrics import (  # noqa: E402
     MetricAccumulator,
@@ -129,11 +128,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Mixed precision: auto/bf16 use bfloat16 autocast on CUDA, off disables it.",
     )
     parser.add_argument(
-        "--cuda-graphs",
-        action="store_true",
-        help="Capture the train step in a CUDA graph (CUDA only, single board size, fixed batch).",
-    )
-    parser.add_argument(
         "--augment-d4",
         action="store_true",
         help="Apply a random D4 board symmetry to each training sample (for non-equivariant models).",
@@ -195,8 +189,6 @@ def _make_optimizer(model: torch.nn.Module, args: argparse.Namespace, device: to
     kwargs: dict[str, object] = {"lr": args.lr}
     if device.type == "cuda":
         kwargs["fused"] = True
-        if args.cuda_graphs:
-            kwargs["capturable"] = True
     return torch.optim.AdamW(_optimizer_param_groups(model, args.weight_decay), **kwargs)
 
 
@@ -222,8 +214,6 @@ def _make_scheduler(
         raise ValueError(f"unknown lr schedule: {args.lr_schedule}")
     if not 0.0 <= args.min_lr_ratio <= 1.0:
         raise ValueError("--min-lr-ratio must be in [0, 1]")
-    if args.cuda_graphs:
-        raise ValueError("--cuda-graphs currently requires --lr-schedule constant")
 
     total_steps = max(1, args.steps)
     warmup_steps = _effective_warmup_steps(args)
@@ -260,24 +250,6 @@ def _restore_scheduler_state(
 ) -> None:
     if scheduler is not None and "scheduler" in checkpoint:
         scheduler.load_state_dict(checkpoint["scheduler"])
-
-
-def _make_graphed_step(
-    args: argparse.Namespace,
-    device: torch.device,
-    boards: list[int],
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    loss_weights: LossWeights,
-    amp_dtype: torch.dtype | None,
-) -> GraphedTrainStep | None:
-    if not args.cuda_graphs:
-        return None
-    if device.type != "cuda":
-        raise ValueError("--cuda-graphs requires a CUDA device")
-    if len(boards) != 1:
-        raise ValueError("--cuda-graphs requires a single board size")
-    return GraphedTrainStep(model, optimizer, loss_weights, args.grad_clip, amp_dtype)
 
 
 @torch.no_grad()
@@ -415,7 +387,6 @@ def _warn_deprecated_legacy_jsonl(data_paths: list[Path]) -> None:
 def _run_training_loop(
     args: argparse.Namespace,
     device: torch.device,
-    boards: list[int],
     model: torch.nn.Module,
     model_config,
     optimizer: torch.optim.Optimizer,
@@ -433,7 +404,6 @@ def _run_training_loop(
     """The single training loop shared by the streaming and eager data paths."""
     early_eval_steps = step_set(args.early_eval_steps)
     train_metrics = MetricAccumulator(loss_weights)
-    graphed_step = _make_graphed_step(args, device, boards, model, optimizer, loss_weights, amp_dtype)
     train_iter = iter(train_loader)
     val_iter = iter(val_loader)
     progress = ProgressBar(args.steps, start_step, args.batch_size, _progress_enabled(args))
@@ -445,17 +415,14 @@ def _run_training_loop(
             cpu_batch = next(train_iter)
             batch = batch_to_device(cpu_batch, device)
             keeper.fence(cpu_batch)
-            if graphed_step is not None:
-                output, head_losses, loss = graphed_step.step(batch)
-            else:
-                output, head_losses, loss = _train_batch(
-                    model,
-                    optimizer,
-                    batch,
-                    loss_weights,
-                    args.grad_clip,
-                    amp_dtype,
-                )
+            output, head_losses, loss = _train_batch(
+                model,
+                optimizer,
+                batch,
+                loss_weights,
+                args.grad_clip,
+                amp_dtype,
+            )
             train_metrics.add_batch(output, batch, head_losses, loss)
             if scheduler is not None:
                 scheduler.step()
@@ -612,7 +579,6 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
         _run_training_loop(
             args,
             device,
-            boards,
             model,
             model_config,
             optimizer,

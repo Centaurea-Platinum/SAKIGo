@@ -122,65 +122,20 @@ def _duration_text(seconds: float) -> str:
     return f"{minutes:d}:{sec:02d}"
 
 
-class _TerminalPalette:
-    """Small prettyterm adapter with an ANSI fallback.
+_ANSI_CODES = {
+    "cyan": "36",
+    "green": "32",
+    "yellow": "33",
+    "dim": "2",
+}
 
-    The optional prettyterm package is not required for non-interactive or CI
-    runs. When it is available, this tries a few common style-call shapes and
-    falls back to direct ANSI escape codes otherwise.
-    """
 
-    _ANSI = {
-        "cyan": "36",
-        "green": "32",
-        "yellow": "33",
-        "dim": "2",
-    }
-
-    def __init__(self, enabled: bool) -> None:
-        self.enabled = enabled
-        try:
-            import prettyterm  # type: ignore[import-not-found]
-        except Exception:
-            prettyterm = None
-        self._prettyterm = prettyterm
-
-    def style(self, text: str, color: str, *, bold: bool = False) -> str:
-        if not self.enabled:
-            return text
-        styled = self._prettyterm_style(text, color, bold=bold)
-        if styled is not None:
-            return styled
-        codes: list[str] = []
-        if bold:
-            codes.append("1")
-        ansi = self._ANSI.get(color)
-        if ansi is not None:
-            codes.append(ansi)
-        if not codes:
-            return text
-        return f"\033[{';'.join(codes)}m{text}\033[0m"
-
-    def _prettyterm_style(self, text: str, color: str, *, bold: bool) -> str | None:
-        prettyterm = self._prettyterm
-        if prettyterm is None:
-            return None
-        for name in ("style", "color", "paint"):
-            function = getattr(prettyterm, name, None)
-            if not callable(function):
-                continue
-            for kwargs in ({"fg": color, "bold": bold}, {"color": color, "bold": bold}):
-                try:
-                    return str(function(text, **kwargs))
-                except TypeError:
-                    continue
-        function = getattr(prettyterm, color, None)
-        if callable(function):
-            try:
-                return str(function(text))
-            except TypeError:
-                return None
-        return None
+def _style(text: str, color: str, *, bold: bool = False, enabled: bool = True) -> str:
+    """Wrap text in ANSI color codes when styling is enabled."""
+    if not enabled:
+        return text
+    codes = (["1"] if bold else []) + [_ANSI_CODES[color]]
+    return f"\033[{';'.join(codes)}m{text}\033[0m"
 
 
 class GenerationProgressBar:
@@ -200,7 +155,7 @@ class GenerationProgressBar:
         self.started_at = time.monotonic()
         self._last_render = 0.0
         self._line_len = 0
-        self._palette = _TerminalPalette(enabled and color)
+        self._color = enabled and color
 
     def render(
         self,
@@ -221,20 +176,26 @@ class GenerationProgressBar:
         ratio = min(1.0, max(0.0, samples / self.target))
         filled = min(self.width, int(self.width * ratio))
         remaining = self.width - filled
-        bar = (
-            self._palette.style("#" * filled, "green")
-            + self._palette.style("-" * remaining, "dim")
+        # Plain-text line first so padding math ignores invisible ANSI codes.
+        plain = (
+            f"generate [{'#' * filled}{'-' * remaining}] {ratio * 100.0:5.1f}% "
+            f"{samples:,}/{self.target:,} visits "
+            f"{samples_per_second:,.1f}/s eta {_duration_text(eta_seconds)} "
+            f"combos {completed_combinations}/{combination_count}"
         )
-        label = self._palette.style("generate", "cyan", bold=True)
-        pct = self._palette.style(f"{ratio * 100.0:5.1f}%", "yellow", bold=True)
+        bar = _style("#" * filled, "green", enabled=self._color) + _style(
+            "-" * remaining, "dim", enabled=self._color
+        )
+        label = _style("generate", "cyan", bold=True, enabled=self._color)
+        pct = _style(f"{ratio * 100.0:5.1f}%", "yellow", bold=True, enabled=self._color)
         text = (
             f"{label} [{bar}] {pct} {samples:,}/{self.target:,} visits "
             f"{samples_per_second:,.1f}/s eta {_duration_text(eta_seconds)} "
             f"combos {completed_combinations}/{combination_count}"
         )
-        padding = max(self._line_len - len(text), 0)
+        padding = max(self._line_len - len(plain), 0)
         print("\r" + text + " " * padding, end="", flush=True)
-        self._line_len = len(text)
+        self._line_len = len(plain)
 
     def clear(self) -> None:
         if not self.enabled or self._line_len == 0:

@@ -18,16 +18,13 @@ from Training.data import (
     StreamingRulesetAwareBatchDataset,
     StreamingJsonlBuffer,
     augment_record_d4,
-    build_ruleset_groups,
     collate,
     expand_data_paths,
     load_records,
     make_batch_dataloader,
     open_jsonl_writer,
     record_from_json,
-    sample_ruleset_aware_batch,
     scan_jsonl_stream_metadata,
-    split_records,
 )
 from Training.losses import (
     LossWeights,
@@ -442,11 +439,6 @@ def test_split_and_streaming_scan_keep_rulesets_separate(tmp_path: Path) -> None
         sample_record_with_ruleset("same-position", "chinese"),
         sample_record_with_ruleset("same-position", "chinese-ogs"),
     ]
-    records = [record_from_json(row) for row in rows]
-    train_records, val_records = split_records(records, 0.5, random.Random(2))
-    assert len(train_records) == 1
-    assert len(val_records) == 1
-
     data_path = tmp_path / "rulesets.jsonl"
     write_jsonl(data_path, rows)
     metadata = scan_jsonl_stream_metadata([data_path], val_fraction=0.5, seed=2, use_cache=False)
@@ -489,19 +481,6 @@ def test_generation_output_writer_rotates_zstd_shards(tmp_path: Path) -> None:
         "samples_000002.jsonl.zst",
     ]
     assert len(load_records(writer.paths)) == 5
-
-
-def test_ruleset_aware_eager_sampler_mixes_rulesets() -> None:
-    rows = [
-        *(sample_record_with_ruleset(f"chinese-{index}", "chinese") for index in range(4)),
-        *(sample_record_with_ruleset(f"japanese-{index}", "japanese") for index in range(4)),
-    ]
-    records = [record_from_json(row) for row in rows]
-    groups = build_ruleset_groups(records)
-    batch = sample_ruleset_aware_batch(groups, 6, random.Random(12))
-
-    assert {record.ruleset["name"] for record in batch if record.ruleset is not None} == {"chinese", "japanese"}
-    assert {record.board_size for record in batch} == {3}
 
 
 def test_streaming_batch_dataset_feeds_torch_dataloader(tmp_path: Path) -> None:
@@ -729,7 +708,7 @@ def test_optimizer_excludes_offsets_norms_and_register_seed_from_weight_decay() 
     model = model_from_config(config_from_spec("model1", board_size=3))
     optimizer = _make_optimizer(
         model,
-        argparse.Namespace(lr=3e-4, weight_decay=1e-4, cuda_graphs=False),
+        argparse.Namespace(lr=3e-4, weight_decay=1e-4),
         torch.device("cpu"),
     )
 
@@ -807,9 +786,11 @@ def test_streaming_train_smoke(tmp_path: Path) -> None:
 
 
 def test_streaming_train_buffer_samples_without_replacement(tmp_path: Path) -> None:
-    data_path = tmp_path / "stream_unique.jsonl"
+    # zst input has no byte-offset index, so this exercises the eviction
+    # buffer's without-replacement pop path.
+    data_path = tmp_path / "stream_unique.jsonl.zst"
     rows = [sample_record(f"p{index}") for index in range(10)]
-    write_jsonl(data_path, rows)
+    write_jsonl_zst(data_path, rows)
 
     first_record = record_from_json(rows[0])
     record_bytes = first_record.array_nbytes() + 256
@@ -827,7 +808,10 @@ def test_streaming_train_buffer_samples_without_replacement(tmp_path: Path) -> N
         rng = random.Random(123)
         seen: list[str] = []
         for _ in range(5):
-            seen.extend(record.position_key for record in stream.sample_batch(TRAIN_SPLIT, 2, rng))
+            seen.extend(
+                record.position_key
+                for record in stream.sample_ruleset_aware_batch(TRAIN_SPLIT, 2, rng)
+            )
 
     assert len(seen) == 10
     assert sorted(seen) == [f"p{index}" for index in range(10)]

@@ -566,32 +566,6 @@ class StreamingJsonlBuffer:
             if not self.entries:
                 raise ValueError("streaming buffer could not load any records")
 
-    def sample_batch(
-        self,
-        split: str,
-        batch_size: int,
-        rng: random.Random,
-        board_weights: Mapping[int, float] | None = None,
-        advance: bool = True,
-    ) -> list[TrainingRecord]:
-        if batch_size <= 0:
-            raise ValueError("batch_size must be positive")
-        if self.metadata.count_for_split(split) <= 0:
-            raise ValueError(f"no records are available for split {split}")
-        with self.lock:
-            self._ensure_split_available(split)
-            sizes = sorted({entry.board_size for entry in self.entries if entry.split == split})
-            if not sizes:
-                raise ValueError(f"streaming buffer has no records for split {split}")
-            board_size = _choose_board_size(sizes, rng, board_weights)
-            if advance:
-                records = self._pop_batch_without_replacement(split, board_size, batch_size, rng)
-                self._refill_split(split, len(records))
-            else:
-                pool = [entry for entry in self.entries if entry.split == split and entry.board_size == board_size]
-                records = [rng.choice(pool).record for _ in range(batch_size)]
-        return records
-
     def sample_ruleset_aware_batch(
         self,
         split: str,
@@ -873,38 +847,6 @@ class StreamingJsonlBuffer:
             if not self._add_entry_preserving_rulesets(entry, split, board_size, target_rulesets):
                 break
 
-    def _pop_batch_without_replacement(
-        self,
-        split: str,
-        board_size: int,
-        batch_size: int,
-        rng: random.Random,
-    ) -> list[TrainingRecord]:
-        records: list[TrainingRecord] = []
-        while len(records) < batch_size:
-            remaining = batch_size - len(records)
-            self._fill_until_pool(split, board_size, remaining)
-            pool_indices = [
-                index
-                for index, entry in enumerate(self.entries)
-                if entry.split == split and entry.board_size == board_size
-            ]
-            if not pool_indices:
-                if self._reader_at_eof:
-                    self._reset_reader()
-                    continue
-                raise ValueError(f"streaming buffer has no {split} records for board size {board_size}")
-            if len(pool_indices) < remaining and self._reader_at_eof:
-                selected_indices = pool_indices
-            else:
-                selected_indices = rng.sample(pool_indices, min(remaining, len(pool_indices)))
-            selected_entries = [self.entries[index] for index in selected_indices]
-            for index in sorted(selected_indices, reverse=True):
-                removed = self.entries.pop(index)
-                self.buffer_bytes -= removed.byte_size
-            records.extend(entry.record for entry in selected_entries)
-        return records
-
     def _sample_ruleset_batch_with_replacement(
         self,
         split: str,
@@ -1086,63 +1028,11 @@ def infer_board_sizes(records: Iterable[TrainingRecord]) -> list[int]:
     return sorted({record.board_size for record in records})
 
 
-def filter_records_by_boards(records: list[TrainingRecord], boards: Iterable[int]) -> list[TrainingRecord]:
-    board_set = set(boards)
-    filtered = [record for record in records if record.board_size in board_set]
-    if not filtered:
-        raise ValueError("no records remain after board-size filtering")
-    return filtered
-
-
-def split_records(
-    records: list[TrainingRecord],
-    val_fraction: float,
-    rng: random.Random,
-) -> tuple[list[TrainingRecord], list[TrainingRecord]]:
-    if not 0.0 <= val_fraction < 1.0:
-        raise ValueError("val_fraction must be in [0, 1)")
-    by_position: dict[tuple[int, str, str], list[TrainingRecord]] = {}
-    for record in records:
-        by_position.setdefault(
-            (record.board_size, record.ruleset_key, record.position_key),
-            [],
-        ).append(record)
-    positions = list(by_position)
-    rng.shuffle(positions)
-    val_count = int(len(positions) * val_fraction)
-    if val_count == 0 and val_fraction > 0.0 and len(positions) > 1:
-        val_count = 1
-    val_positions = set(positions[:val_count])
-    train_records: list[TrainingRecord] = []
-    val_records: list[TrainingRecord] = []
-    for position, position_records in by_position.items():
-        (val_records if position in val_positions else train_records).extend(position_records)
-    return train_records, val_records
-
-
 def build_groups(records: list[TrainingRecord]) -> dict[int, list[list[TrainingRecord]]]:
     grouped: dict[int, dict[int, list[TrainingRecord]]] = {}
     for record in records:
         grouped.setdefault(record.board_size, {}).setdefault(record.ply, []).append(record)
     return {size: list(groups.values()) for size, groups in grouped.items() if groups}
-
-
-def build_ruleset_groups(records: list[TrainingRecord]) -> dict[int, dict[str, list[list[TrainingRecord]]]]:
-    grouped: dict[int, dict[str, dict[int, list[TrainingRecord]]]] = {}
-    for record in records:
-        grouped.setdefault(record.board_size, {}).setdefault(
-            record.ruleset_key,
-            {},
-        ).setdefault(record.ply, []).append(record)
-    return {
-        size: {
-            ruleset_key: list(ply_groups.values())
-            for ruleset_key, ply_groups in ruleset_groups.items()
-            if ply_groups
-        }
-        for size, ruleset_groups in grouped.items()
-        if ruleset_groups
-    }
 
 
 def sample_batch(
@@ -1159,26 +1049,6 @@ def sample_batch(
     size = _choose_board_size(sizes, rng, board_weights)
     groups = groups_by_size[size]
     return [rng.choice(rng.choice(groups)) for _ in range(batch_size)]
-
-
-def sample_ruleset_aware_batch(
-    groups_by_size: dict[int, dict[str, list[list[TrainingRecord]]]],
-    batch_size: int,
-    rng: random.Random,
-    board_weights: Mapping[int, float] | None = None,
-) -> list[TrainingRecord]:
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-    sizes = list(groups_by_size)
-    if not sizes:
-        raise ValueError("cannot sample from empty groups")
-    size = _choose_board_size(sizes, rng, board_weights)
-    ruleset_groups = groups_by_size[size]
-    records: list[TrainingRecord] = []
-    for ruleset_key in _balanced_key_order(sorted(ruleset_groups), batch_size, rng):
-        groups = ruleset_groups[ruleset_key]
-        records.append(rng.choice(rng.choice(groups)))
-    return records
 
 
 def _stack_optional(
@@ -1260,39 +1130,6 @@ def collate(records: list[TrainingRecord], device: torch.device) -> dict[str, to
     which silently corrupts the copied batch.
     """
     return batch_to_device(collate_cpu(records, pin_memory=False), device, non_blocking=False)
-
-
-class RulesetAwareBatchDataset(IterableDataset[list[TrainingRecord]]):
-    """Infinite iterable dataset yielding homogeneous, ruleset-balanced record batches."""
-
-    def __init__(
-        self,
-        groups_by_size: dict[int, dict[str, list[list[TrainingRecord]]]],
-        batch_size: int,
-        rng: random.Random,
-        board_weights: Mapping[int, float] | None = None,
-        *,
-        augment_d4: bool = False,
-    ) -> None:
-        self.groups_by_size = groups_by_size
-        self.batch_size = batch_size
-        self.rng = rng
-        self.board_weights = board_weights
-        self.augment_d4 = augment_d4
-
-    def __iter__(self):
-        if get_worker_info() is not None:
-            raise ValueError("RulesetAwareBatchDataset requires DataLoader(num_workers=0)")
-        while True:
-            records = sample_ruleset_aware_batch(
-                self.groups_by_size,
-                self.batch_size,
-                self.rng,
-                self.board_weights,
-            )
-            if self.augment_d4:
-                records = [augment_record_d4(record, self.rng.randrange(8)) for record in records]
-            yield records
 
 
 class StreamingRulesetAwareBatchDataset(IterableDataset[list[TrainingRecord]]):
