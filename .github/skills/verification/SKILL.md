@@ -28,11 +28,19 @@ can't falsify is ceremony; skip it and spend the effort where a bug could hide.
    bugs, 4 were false positives). For each finding, open the actual code and
    re-derive the claim before fixing anything. Domain definitions matter:
    e.g. *positional* superko keys on board only — a "missing side-to-move in
-   hash" finding is wrong by definition.
-5. **Verify the arithmetic of your own story.** Before explaining observed
+   hash" finding is wrong by definition. Do not delegate audits to weak models
+   (owner instruction 2026-07-06: no Haiku-class subagents — too many false
+   positives AND negatives); prefer doing the pass yourself.
+5. **Robustness = the rebuild question.** For infrastructure, ask "what would a
+   clean rebuild do differently?" and grade the gap: duplicated logic that can
+   drift (two copies of a training loop), non-atomic writes of files another
+   process or a resume will read (checkpoints, status JSON, caches), process
+   lifecycles without a `finally` (orphaned engines), dead config surface
+   (no-op CLI args). Fix the cheap ones; record the structural ones as issues.
+6. **Verify the arithmetic of your own story.** Before explaining observed
    behavior (loss curves, sampling exposure, throughput), check the counting:
    samples seen per record, batches per epoch, who computes what when.
-6. **Distinguish "code wrong" from "coverage missing".** A clean scan with
+7. **Distinguish "code wrong" from "coverage missing".** A clean scan with
    untested behavior is not a clean scan. The fix for a coverage gap is a test
    that would have caught the feared bug.
 
