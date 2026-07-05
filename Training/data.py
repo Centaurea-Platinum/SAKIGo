@@ -5,7 +5,7 @@ import json
 import queue
 import random
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import blake2b
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
@@ -180,6 +180,7 @@ class JsonlStreamMetadata:
     val_count: int
     board_counts: dict[int, int]
     ruleset_counts: dict[str, int]
+    board_ruleset_counts: dict[int, dict[str, int]] = field(default_factory=dict)
 
     @property
     def board_sizes(self) -> list[int]:
@@ -192,6 +193,14 @@ class JsonlStreamMetadata:
             return self.val_count
         raise ValueError(f"unknown split: {split}")
 
+    def rulesets_for_board(self, board_size: int) -> list[str]:
+        counts = self.board_ruleset_counts.get(board_size)
+        if counts:
+            return sorted(counts)
+        if len(self.board_counts) == 1 and board_size in self.board_counts:
+            return sorted(self.ruleset_counts)
+        return []
+
 
 @dataclass(frozen=True)
 class BufferedJsonlRecord:
@@ -201,6 +210,33 @@ class BufferedJsonlRecord:
     byte_size: int
     board_size: int
     split: str
+    ruleset_key: str
+
+
+def _choose_board_size(
+    sizes: Iterable[int],
+    rng: random.Random,
+    board_weights: Mapping[int, float] | None = None,
+) -> int:
+    choices = list(sizes)
+    if not choices:
+        raise ValueError("cannot sample from empty board-size set")
+    if board_weights is None:
+        return rng.choice(choices)
+    weights = [board_weights.get(size, 1.0) for size in choices]
+    return rng.choices(choices, weights=weights, k=1)[0]
+
+
+def _balanced_key_order(keys: Iterable[str], count: int, rng: random.Random) -> list[str]:
+    choices = list(keys)
+    if not choices:
+        raise ValueError("cannot sample from empty ruleset set")
+    order: list[str] = []
+    while len(order) < count:
+        cycle = choices.copy()
+        rng.shuffle(cycle)
+        order.extend(cycle[: count - len(order)])
+    return order
 
 
 def split_for_position(
@@ -270,9 +306,14 @@ def scan_jsonl_stream_metadata(
                         str(ruleset): int(count)
                         for ruleset, count in entry.get("ruleset_counts", {"": entry["record_count"]}).items()
                     },
+                    board_ruleset_counts={
+                        int(size): {str(ruleset): int(count) for ruleset, count in counts.items()}
+                        for size, counts in entry.get("board_ruleset_counts", {}).items()
+                    },
                 )
     board_counts: dict[int, int] = {}
     ruleset_counts: dict[str, int] = {}
+    board_ruleset_counts: dict[int, dict[str, int]] = {}
     record_count = 0
     train_count = 0
     val_count = 0
@@ -301,6 +342,8 @@ def scan_jsonl_stream_metadata(
                 record_count += 1
                 board_counts[board_size] = board_counts.get(board_size, 0) + 1
                 ruleset_counts[ruleset_key] = ruleset_counts.get(ruleset_key, 0) + 1
+                board_rule_counts = board_ruleset_counts.setdefault(board_size, {})
+                board_rule_counts[ruleset_key] = board_rule_counts.get(ruleset_key, 0) + 1
                 if split == VAL_SPLIT:
                     val_count += 1
                 else:
@@ -313,6 +356,7 @@ def scan_jsonl_stream_metadata(
         val_count=val_count,
         board_counts=board_counts,
         ruleset_counts=ruleset_counts,
+        board_ruleset_counts=board_ruleset_counts,
     )
     if cache_path is not None and cache_key is not None:
         try:
@@ -325,6 +369,9 @@ def scan_jsonl_stream_metadata(
             "val_count": metadata.val_count,
             "board_counts": {str(size): count for size, count in metadata.board_counts.items()},
             "ruleset_counts": metadata.ruleset_counts,
+            "board_ruleset_counts": {
+                str(size): counts for size, counts in metadata.board_ruleset_counts.items()
+            },
         }
         try:
             cache_path.write_text(json.dumps(cached), encoding="utf-8")
@@ -415,17 +462,39 @@ class StreamingJsonlBuffer:
             sizes = sorted({entry.board_size for entry in self.entries if entry.split == split})
             if not sizes:
                 raise ValueError(f"streaming buffer has no records for split {split}")
-            if board_weights is None:
-                board_size = rng.choice(sizes)
-            else:
-                weights = [board_weights.get(size, 1.0) for size in sizes]
-                board_size = rng.choices(sizes, weights=weights, k=1)[0]
+            board_size = _choose_board_size(sizes, rng, board_weights)
             if advance:
                 records = self._pop_batch_without_replacement(split, board_size, batch_size, rng)
                 self._refill_split(split, len(records))
             else:
                 pool = [entry for entry in self.entries if entry.split == split and entry.board_size == board_size]
                 records = [rng.choice(pool).record for _ in range(batch_size)]
+        return records
+
+    def sample_ruleset_aware_batch(
+        self,
+        split: str,
+        batch_size: int,
+        rng: random.Random,
+        board_weights: Mapping[int, float] | None = None,
+        advance: bool = True,
+    ) -> list[TrainingRecord]:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if self.metadata.count_for_split(split) <= 0:
+            raise ValueError(f"no records are available for split {split}")
+        with self.lock:
+            self._ensure_split_available(split)
+            sizes = sorted({entry.board_size for entry in self.entries if entry.split == split})
+            if not sizes:
+                raise ValueError(f"streaming buffer has no records for split {split}")
+            board_size = _choose_board_size(sizes, rng, board_weights)
+            self._ensure_rulesets_available(split, board_size)
+            if advance:
+                records = self._pop_ruleset_batch_without_replacement(split, board_size, batch_size, rng)
+                self._refill_split(split, len(records))
+            else:
+                records = self._sample_ruleset_batch_with_replacement(split, board_size, batch_size, rng)
         return records
 
     def advance(self, accepted_records: int) -> None:
@@ -445,6 +514,7 @@ class StreamingJsonlBuffer:
                 "buffer_bytes": self.buffer_bytes,
                 "buffer_records": len(self.entries),
                 "max_buffer_bytes": self.max_buffer_bytes,
+                "buffer_rulesets": len({entry.ruleset_key for entry in self.entries}),
             }
 
     def _ensure_split_available(self, split: str) -> None:
@@ -488,6 +558,59 @@ class StreamingJsonlBuffer:
         self.entries.append(entry)
         self.buffer_bytes += entry.byte_size
 
+    def _ruleset_counts(self, split: str, board_size: int) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for entry in self.entries:
+            if entry.split == split and entry.board_size == board_size:
+                counts[entry.ruleset_key] = counts.get(entry.ruleset_key, 0) + 1
+        return counts
+
+    def _add_entry_preserving_rulesets(
+        self,
+        entry: BufferedJsonlRecord,
+        split: str,
+        board_size: int,
+        protected_rulesets: set[str],
+    ) -> bool:
+        if entry.byte_size > self.max_buffer_bytes:
+            raise ValueError(
+                "streaming buffer is too small to hold a single record; "
+                "increase --stream-buffer-mb"
+            )
+        while self.entries and self.buffer_bytes + entry.byte_size > self.max_buffer_bytes:
+            counts = self._ruleset_counts(split, board_size)
+            candidates = []
+            for index, buffered in enumerate(self.entries):
+                is_protected = (
+                    buffered.split == split
+                    and buffered.board_size == board_size
+                    and buffered.ruleset_key in protected_rulesets
+                    and counts.get(buffered.ruleset_key, 0) <= 1
+                )
+                if not is_protected:
+                    candidates.append(index)
+            if not candidates:
+                return False
+            index = self._evict_rng.choice(candidates)
+            removed = self.entries.pop(index)
+            self.buffer_bytes -= removed.byte_size
+        self.entries.append(entry)
+        self.buffer_bytes += entry.byte_size
+        return True
+
+    def _ensure_rulesets_available(self, split: str, board_size: int) -> None:
+        target_rulesets = set(self.metadata.rulesets_for_board(board_size))
+        if len(target_rulesets) <= 1:
+            return
+        while target_rulesets - set(self._ruleset_counts(split, board_size)):
+            if self._reader_at_eof:
+                break
+            entry = self._read_next_accepted(allowed_splits={split})
+            if entry is None:
+                break
+            if not self._add_entry_preserving_rulesets(entry, split, board_size, target_rulesets):
+                break
+
     def _pop_batch_without_replacement(
         self,
         split: str,
@@ -518,6 +641,68 @@ class StreamingJsonlBuffer:
                 removed = self.entries.pop(index)
                 self.buffer_bytes -= removed.byte_size
             records.extend(entry.record for entry in selected_entries)
+        return records
+
+    def _sample_ruleset_batch_with_replacement(
+        self,
+        split: str,
+        board_size: int,
+        batch_size: int,
+        rng: random.Random,
+    ) -> list[TrainingRecord]:
+        pools: dict[str, list[BufferedJsonlRecord]] = {}
+        for entry in self.entries:
+            if entry.split == split and entry.board_size == board_size:
+                pools.setdefault(entry.ruleset_key, []).append(entry)
+        if not pools:
+            raise ValueError(f"streaming buffer has no {split} records for board size {board_size}")
+        records: list[TrainingRecord] = []
+        for ruleset_key in _balanced_key_order(sorted(pools), batch_size, rng):
+            records.append(rng.choice(pools[ruleset_key]).record)
+        return records
+
+    def _pop_ruleset_batch_without_replacement(
+        self,
+        split: str,
+        board_size: int,
+        batch_size: int,
+        rng: random.Random,
+    ) -> list[TrainingRecord]:
+        records: list[TrainingRecord] = []
+        while len(records) < batch_size:
+            self._ensure_rulesets_available(split, board_size)
+            if not self._ruleset_counts(split, board_size):
+                self._fill_until_pool(split, board_size, 1)
+            rulesets = sorted(self._ruleset_counts(split, board_size))
+            if not rulesets:
+                if self._reader_at_eof:
+                    self._reset_reader()
+                    continue
+                raise ValueError(f"streaming buffer has no {split} records for board size {board_size}")
+            before = len(records)
+            for ruleset_key in _balanced_key_order(rulesets, batch_size - len(records), rng):
+                pool_indices = [
+                    index
+                    for index, entry in enumerate(self.entries)
+                    if (
+                        entry.split == split
+                        and entry.board_size == board_size
+                        and entry.ruleset_key == ruleset_key
+                    )
+                ]
+                if not pool_indices:
+                    continue
+                index = rng.choice(pool_indices)
+                removed = self.entries.pop(index)
+                self.buffer_bytes -= removed.byte_size
+                records.append(removed.record)
+                if len(records) >= batch_size:
+                    break
+            if len(records) == before:
+                if self._reader_at_eof:
+                    self._reset_reader()
+                    continue
+                raise ValueError(f"streaming buffer could not sample {split} records for board size {board_size}")
         return records
 
     def _fill_until_pool(self, split: str, board_size: int, target_count: int) -> None:
@@ -570,6 +755,7 @@ class StreamingJsonlBuffer:
                 byte_size=record.array_nbytes() + 256,
                 board_size=record.board_size,
                 split=split,
+                ruleset_key=record.ruleset_key,
             )
 
     def _reset_reader(self) -> None:
@@ -679,6 +865,24 @@ def build_groups(records: list[TrainingRecord]) -> dict[int, list[list[TrainingR
     return {size: list(groups.values()) for size, groups in grouped.items() if groups}
 
 
+def build_ruleset_groups(records: list[TrainingRecord]) -> dict[int, dict[str, list[list[TrainingRecord]]]]:
+    grouped: dict[int, dict[str, dict[int, list[TrainingRecord]]]] = {}
+    for record in records:
+        grouped.setdefault(record.board_size, {}).setdefault(
+            record.ruleset_key,
+            {},
+        ).setdefault(record.ply, []).append(record)
+    return {
+        size: {
+            ruleset_key: list(ply_groups.values())
+            for ruleset_key, ply_groups in ruleset_groups.items()
+            if ply_groups
+        }
+        for size, ruleset_groups in grouped.items()
+        if ruleset_groups
+    }
+
+
 def sample_batch(
     groups_by_size: dict[int, list[list[TrainingRecord]]],
     batch_size: int,
@@ -690,13 +894,29 @@ def sample_batch(
     sizes = list(groups_by_size)
     if not sizes:
         raise ValueError("cannot sample from empty groups")
-    if board_weights is None:
-        size = rng.choice(sizes)
-    else:
-        weights = [board_weights.get(size, 1.0) for size in sizes]
-        size = rng.choices(sizes, weights=weights, k=1)[0]
+    size = _choose_board_size(sizes, rng, board_weights)
     groups = groups_by_size[size]
     return [rng.choice(rng.choice(groups)) for _ in range(batch_size)]
+
+
+def sample_ruleset_aware_batch(
+    groups_by_size: dict[int, dict[str, list[list[TrainingRecord]]]],
+    batch_size: int,
+    rng: random.Random,
+    board_weights: Mapping[int, float] | None = None,
+) -> list[TrainingRecord]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    sizes = list(groups_by_size)
+    if not sizes:
+        raise ValueError("cannot sample from empty groups")
+    size = _choose_board_size(sizes, rng, board_weights)
+    ruleset_groups = groups_by_size[size]
+    records: list[TrainingRecord] = []
+    for ruleset_key in _balanced_key_order(sorted(ruleset_groups), batch_size, rng):
+        groups = ruleset_groups[ruleset_key]
+        records.append(rng.choice(rng.choice(groups)))
+    return records
 
 
 def _stack_optional(

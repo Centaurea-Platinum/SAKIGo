@@ -39,13 +39,13 @@ from Training.data import (  # noqa: E402
     StreamingJsonlBuffer,
     augment_record_d4,
     batch_to_device,
-    build_groups,
+    build_ruleset_groups,
     collate,
     collate_cpu,
     filter_records_by_boards,
     infer_board_sizes,
     load_records,
-    sample_batch,
+    sample_ruleset_aware_batch,
     scan_jsonl_stream_metadata,
     split_records,
 )
@@ -293,7 +293,7 @@ def _make_graphed_step(
 @torch.no_grad()
 def balanced_eval(
     model: torch.nn.Module,
-    groups_by_size: dict[int, list[list]],
+    groups_by_size: dict[int, dict[str, list[list]]],
     batch_size: int,
     rng: random.Random,
     device: torch.device,
@@ -305,7 +305,7 @@ def balanced_eval(
     model.eval()
     accumulator = MetricAccumulator(loss_weights)
     for _ in range(max(1, batches)):
-        batch = collate(sample_batch(groups_by_size, batch_size, rng, board_weights), device)
+        batch = collate(sample_ruleset_aware_batch(groups_by_size, batch_size, rng, board_weights), device)
         _check_eval_batch(batch)
         with _autocast(amp_dtype):
             output = model(batch["board"], batch["rules"])
@@ -332,7 +332,7 @@ def balanced_eval_streaming(
     accumulator = MetricAccumulator(loss_weights)
     for _ in range(max(1, batches)):
         batch = collate(
-            stream.sample_batch(split, batch_size, rng, board_weights, advance=False),
+            stream.sample_ruleset_aware_batch(split, batch_size, rng, board_weights, advance=False),
             device,
         )
         _check_eval_batch(batch)
@@ -526,7 +526,7 @@ def _run_streaming(args: argparse.Namespace, data_paths: list[Path]) -> None:
         pin = device.type == "cuda"
 
         def produce_train_batch() -> dict[str, torch.Tensor]:
-            records = stream.sample_batch(train_split, args.batch_size, train_rng, board_weights)
+            records = stream.sample_ruleset_aware_batch(train_split, args.batch_size, train_rng, board_weights)
             if args.augment_d4:
                 records = [augment_record_d4(record, train_rng.randrange(8)) for record in records]
             return collate_cpu(records, pin_memory=pin)
@@ -635,8 +635,8 @@ def main(argv: list[str] | None = None) -> None:
         train_records = val_records
     if not val_records:
         val_records = train_records
-    train_groups = build_groups(train_records)
-    val_groups = build_groups(val_records)
+    train_groups = build_ruleset_groups(train_records)
+    val_groups = build_ruleset_groups(val_records)
 
     device = training_device(args.device)
     if device.type == "cuda":
@@ -674,7 +674,7 @@ def main(argv: list[str] | None = None) -> None:
     pin = device.type == "cuda"
 
     def produce_train_batch() -> dict[str, torch.Tensor]:
-        records = sample_batch(train_groups, args.batch_size, train_rng, board_weights)
+        records = sample_ruleset_aware_batch(train_groups, args.batch_size, train_rng, board_weights)
         if args.augment_d4:
             records = [augment_record_d4(record, train_rng.randrange(8)) for record in records]
         return collate_cpu(records, pin_memory=pin)

@@ -17,9 +17,11 @@ from Training.data import (
     TRAIN_SPLIT,
     StreamingJsonlBuffer,
     augment_record_d4,
+    build_ruleset_groups,
     collate,
     load_records,
     record_from_json,
+    sample_ruleset_aware_batch,
     scan_jsonl_stream_metadata,
     split_records,
 )
@@ -418,6 +420,46 @@ def test_split_and_streaming_scan_keep_rulesets_separate(tmp_path: Path) -> None
     assert metadata.record_count == 2
     assert metadata.train_count + metadata.val_count == 2
     assert sorted(metadata.ruleset_counts.values()) == [1, 1]
+
+
+def test_ruleset_aware_eager_sampler_mixes_rulesets() -> None:
+    rows = [
+        *(sample_record_with_ruleset(f"chinese-{index}", "chinese") for index in range(4)),
+        *(sample_record_with_ruleset(f"japanese-{index}", "japanese") for index in range(4)),
+    ]
+    records = [record_from_json(row) for row in rows]
+    groups = build_ruleset_groups(records)
+    batch = sample_ruleset_aware_batch(groups, 6, random.Random(12))
+
+    assert {record.ruleset["name"] for record in batch if record.ruleset is not None} == {"chinese", "japanese"}
+    assert {record.board_size for record in batch} == {3}
+
+
+def test_streaming_ruleset_aware_sampler_mixes_blocked_rulesets(tmp_path: Path) -> None:
+    rows = [
+        *(sample_record_with_ruleset(f"chinese-{index}", "chinese") for index in range(3)),
+        *(sample_record_with_ruleset(f"japanese-{index}", "japanese") for index in range(3)),
+    ]
+    data_path = tmp_path / "blocked_rulesets.jsonl"
+    write_jsonl(data_path, rows)
+
+    first_record = record_from_json(rows[0])
+    record_bytes = first_record.array_nbytes() + 256
+    metadata = scan_jsonl_stream_metadata([data_path], val_fraction=0.0, seed=9, use_cache=False)
+    assert sorted(metadata.ruleset_counts.values()) == [3, 3]
+
+    with StreamingJsonlBuffer(
+        paths=[data_path],
+        boards=[3],
+        val_fraction=0.0,
+        seed=9,
+        max_buffer_bytes=record_bytes * 3,
+        metadata=metadata,
+    ) as stream:
+        stream.prime(minimum_records=2)
+        batch = stream.sample_ruleset_aware_batch(TRAIN_SPLIT, 4, random.Random(5))
+
+    assert {record.ruleset["name"] for record in batch if record.ruleset is not None} == {"chinese", "japanese"}
 
 
 def test_collate_keeps_pass_as_final_action_and_rejects_mixed_sizes(tmp_path: Path) -> None:
