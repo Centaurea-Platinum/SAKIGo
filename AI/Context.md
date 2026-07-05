@@ -4,7 +4,7 @@ Long-term memory for AI collaborators. Read this before acting, then update it w
 
 ## What SAKIGo is
 
-SAKIGo is a new Go AI ("New GoAI"; see [../README.md](../README.md)). Direction: KataGo-style neural network plus search, with selectable scoring / ko / suicide rules at inference instead of a single baked-in ruleset.
+SAKI currently stands for **SymmetryAwareKatago-DistillationImplementation**. SAKIGo is the Go AI project built around that direction: KataGo-style neural network plus search, with selectable scoring / ko / suicide rules at inference instead of a single baked-in ruleset.
 
 ## Current phase
 
@@ -21,7 +21,7 @@ Search, final scoring, end-of-game adjudication, self-play, and exact KataGo tea
 
 - [Engine/README.md](../Engine/README.md) - Rust rules/encoding engine. Owns board topology, captures, suicide, simple ko, positional superko, pass moves, history hashes, capture accounting, and feature encoding.
 - [Model/README.md](../Model/README.md) - PyTorch model package. Public API is `forward(board, rules)`, with outputs `wdl_logits`, `score`, `ownership_logits`, `policy_logits`, and `budget_logits`.
-- [Design/ModelSpecs/ModelSpecs.md](../Design/ModelSpecs/ModelSpecs.md) - JSON-compatible model specs consumed by `Model/sakigo_model/specs.py`. Defines `model1` and `model2` with reusable stem/head shape files.
+- [Design/ModelSpecs/ModelSpecs.md](../Design/ModelSpecs/ModelSpecs.md) - JSON-compatible model specs consumed by `Model/sakigo_model/specs.py`. Defines `model1`, `model2`, and `model3` with reusable stem/head shape files.
 - [Model/sakigo_model/adapters.py](../Model/sakigo_model/adapters.py) - canonical game-state projections for SAKIGo and KataGo distillation scaffolding.
 - [Training/generate_katago_phase1.py](../Training/generate_katago_phase1.py) - KataGo Phase 1 data generator. Keeps concurrent games/positions in flight, writes schema-v1 JSONL records, and maps KataGo analysis output into SAKIGo heads.
 - [Training/train.py](../Training/train.py) - JSONL trainer for the current five heads. Default mode still eager-loads records for small runs; pass `--stream-buffer-mb N` for the bounded-memory streaming path (decode-at-insert numpy records). Defaults include bf16 autocast on CUDA, fused AdamW, and a 2-deep background batch prefetcher; `--cuda-graphs` opts into full-step graph capture (single board size, fixed batch); `--augment-d4` applies random board symmetries for non-equivariant models; `--progress` renders a terminal progress bar.

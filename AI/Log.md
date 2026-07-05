@@ -2,6 +2,11 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-05 - Denoted SAKI acronym
+
+- Added the public README definition: **SAKI** currently stands for **SymmetryAwareKatago-DistillationImplementation**.
+- Mirrored the same definition in [Context.md](Context.md) for future AI collaborators and corrected the model-spec context to include `model3`.
+
 ## 2026-07-03 - Fixed stale eval weight cache causing live val-loss mismatch
 
 - Re-checked the active `phase1_20260703_215600_model1` run: its live CSV still reported uniform-ish validation at step 512 (`val_policy_loss` about 5.89) while train policy loss fell to about 3.95. Loading the same `step_000512.pt` checkpoint in a fresh CPU process scored real val slices much lower (`policy` about 1.89 near the file front and about 3.62 at val offset 5000), proving the checkpoint was good and the in-process eval metric was stale.
