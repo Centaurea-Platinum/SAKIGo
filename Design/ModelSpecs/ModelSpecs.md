@@ -66,6 +66,27 @@
         "local_rope_frequencies": ["pi/2"]
       },
       "norm_eps": 0.000001
+    },
+    "model3": {
+      "name": "Model 3",
+      "architecture": "d4_equivariant",
+      "activation": "SiLU",
+      "max_board_size": 32,
+      "stem_shape": "regular_v1",
+      "head_shape": "standard_v1",
+      "trunk": {
+        "block_count": 16,
+        "register_count": 2,
+        "expanded_channel": 128,
+        "bottleneck_channel": 64,
+        "register_gather_blocks": [1, 6, 13, 16],
+        "register_broadcast_blocks": [1, 6, 13, 16],
+        "q_heads": 2,
+        "kv_heads": 1,
+        "global_rope_frequencies": ["pi", "pi/2"],
+        "local_rope_frequencies": ["pi/2", "pi/4"]
+      },
+      "norm_eps": 0.000001
     }
   }
 }

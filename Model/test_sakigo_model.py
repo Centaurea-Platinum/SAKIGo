@@ -477,6 +477,7 @@ def test_model_specs_build_expected_config() -> None:
     assert model_spec_names() == (
         "model1",
         "model2",
+        "model3",
     )
     config = config_from_spec("model1")
     assert config.board_size == 32
@@ -498,6 +499,13 @@ def test_model_specs_build_expected_config() -> None:
     assert model2.q_heads == 2
     assert model2.kv_heads == 1
     assert model2.head_dim == 32
+    model3 = config_from_spec("model3")
+    assert model3.trunk_channels == 128
+    assert model3.q_heads == 2
+    assert model3.kv_heads == 1
+    assert model3.head_dim == 32
+    assert model3.global_rope_frequencies == (pi, pi / 2)
+    assert model3.local_rope_frequencies == (pi / 2, pi / 4)
     assert isinstance(model_from_spec("model1"), SakiGoModel)
     assert ScalarSakiGoModel().config.architecture == "ScalarSakiGoModel"
 
