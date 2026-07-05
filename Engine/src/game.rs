@@ -261,7 +261,12 @@ impl GameState {
                 .group_at(point)
                 .expect("played stone should still be on the board");
             if own_group.has_no_liberties() {
-                if self.rules.suicide == SuicideRule::Forbidden {
+                // KataGo semantics: `SuicideRule::Allowed` legalizes
+                // multi-stone suicide only. Single-stone suicide is always
+                // illegal (the board would revert to the pre-move position).
+                // This matches the Phase 1 generator and KataGo's
+                // multiStoneSuicideLegal.
+                if self.rules.suicide == SuicideRule::Forbidden || own_group.stone_count() == 1 {
                     return Err(IllegalMove::Suicide { point });
                 }
                 self_captured_points = own_group.stones().to_vec();
@@ -380,16 +385,44 @@ mod tests {
             7.5,
         );
         let mut board = Board::new(3).unwrap();
+        board.set(Point::new(0, 0), Some(Color::Black)).unwrap();
+        board.set(Point::new(0, 1), Some(Color::White)).unwrap();
+        board.set(Point::new(1, 1), Some(Color::White)).unwrap();
+        board.set(Point::new(2, 0), Some(Color::White)).unwrap();
+        let mut state = GameState::from_board(board, rules, Color::Black, [0, 0]);
+
+        // Joining (0,0) makes a two-stone Black group with no liberties:
+        // multi-stone suicide, legal under SuicideRule::Allowed.
+        let outcome = state.play(GoMove::Play(Point::new(1, 0))).unwrap();
+        assert_eq!(outcome.captured_self, 2);
+        assert_eq!(state.board().get(Point::new(0, 0)), None);
+        assert_eq!(state.board().get(Point::new(1, 0)), None);
+        assert_eq!(state.captured_by(Color::White), 2);
+    }
+
+    #[test]
+    fn single_stone_suicide_is_always_illegal() {
+        let rules = Ruleset::new(
+            ScoringRule::Area,
+            KoRule::SimpleKo,
+            SuicideRule::Allowed,
+            7.5,
+        );
+        let mut board = Board::new(3).unwrap();
         board.set(Point::new(0, 1), Some(Color::White)).unwrap();
         board.set(Point::new(1, 0), Some(Color::White)).unwrap();
         board.set(Point::new(1, 2), Some(Color::White)).unwrap();
         board.set(Point::new(2, 1), Some(Color::White)).unwrap();
-        let mut state = GameState::from_board(board, rules, Color::Black, [0, 0]);
+        let state = GameState::from_board(board, rules, Color::Black, [0, 0]);
 
-        let outcome = state.play(GoMove::Play(Point::new(1, 1))).unwrap();
-        assert_eq!(outcome.captured_self, 1);
-        assert_eq!(state.board().get(Point::new(1, 1)), None);
-        assert_eq!(state.captured_by(Color::White), 1);
+        // KataGo semantics: even with suicide allowed, a lone stone may not
+        // self-capture (the move would be a board no-op).
+        assert_eq!(
+            state.would_be_legal(Point::new(1, 1)),
+            Err(IllegalMove::Suicide {
+                point: Point::new(1, 1)
+            })
+        );
     }
 
     #[test]
@@ -429,13 +462,19 @@ mod tests {
             SuicideRule::Allowed,
             7.5,
         );
-        let state = GameState::new(1, rules).unwrap();
-        // On 1x1 the first stone is an allowed single-stone suicide, which
-        // would recreate the empty initial board: a repeated position.
+        let mut state = GameState::new(2, rules).unwrap();
+        state.play(GoMove::Play(Point::new(0, 0))).unwrap();
+        state.play(GoMove::Pass).unwrap();
+        state.play(GoMove::Play(Point::new(1, 0))).unwrap();
+        state.play(GoMove::Pass).unwrap();
+        state.play(GoMove::Play(Point::new(0, 1))).unwrap();
+        state.play(GoMove::Pass).unwrap();
+        // Filling the last point is a four-stone suicide that would recreate
+        // the empty initial board: a repeated position.
         assert_eq!(
-            state.would_be_legal(Point::new(0, 0)),
+            state.would_be_legal(Point::new(1, 1)),
             Err(IllegalMove::SuperKo {
-                point: Point::new(0, 0)
+                point: Point::new(1, 1)
             })
         );
     }

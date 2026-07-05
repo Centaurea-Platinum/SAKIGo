@@ -36,22 +36,14 @@ from Training.data import (  # noqa: E402
     TRAIN_SPLIT,
     VAL_SPLIT,
     PinnedBatchKeeper,
-    RulesetAwareBatchDataset,
     StreamingRulesetAwareBatchDataset,
     StreamingJsonlBuffer,
     batch_to_device,
-    build_ruleset_groups,
-    collate,
     data_format_label,
     expand_data_paths,
-    filter_records_by_boards,
-    infer_board_sizes,
     is_legacy_jsonl_path,
-    load_records,
     make_batch_dataloader,
-    sample_ruleset_aware_batch,
     scan_jsonl_stream_metadata,
-    split_records,
 )
 from Training.graph_step import GraphedTrainStep  # noqa: E402
 from Training.losses import LossWeights, compute_head_losses, weighted_total_loss  # noqa: E402
@@ -128,10 +120,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stream-buffer-mb",
         type=float,
         default=1024.0,
-        help=(
-            "Decoded-record streaming buffer in MiB. Defaults to 1024. "
-            "Set 0 to use deprecated eager loading of legacy single JSONL files."
-        ),
+        help="Decoded-record streaming buffer in MiB. Defaults to 1024.",
     )
     parser.add_argument(
         "--amp",
@@ -292,60 +281,6 @@ def _make_graphed_step(
 
 
 @torch.no_grad()
-def balanced_eval(
-    model: torch.nn.Module,
-    groups_by_size: dict[int, dict[str, list[list]]],
-    batch_size: int,
-    rng: random.Random,
-    device: torch.device,
-    batches: int,
-    board_weights: dict[int, float],
-    loss_weights: LossWeights,
-    amp_dtype: torch.dtype | None = None,
-) -> MetricAccumulator:
-    model.eval()
-    accumulator = MetricAccumulator(loss_weights)
-    for _ in range(max(1, batches)):
-        batch = collate(sample_ruleset_aware_batch(groups_by_size, batch_size, rng, board_weights), device)
-        _check_eval_batch(batch)
-        with _autocast(amp_dtype):
-            output = model(batch["board"], batch["rules"])
-            head_losses = compute_head_losses(output, batch)
-            total_loss = weighted_total_loss(head_losses, loss_weights)
-        accumulator.add_batch(output, batch, head_losses, total_loss)
-    return accumulator
-
-
-@torch.no_grad()
-def balanced_eval_streaming(
-    model: torch.nn.Module,
-    stream: StreamingJsonlBuffer,
-    split: str,
-    batch_size: int,
-    rng: random.Random,
-    device: torch.device,
-    batches: int,
-    board_weights: dict[int, float],
-    loss_weights: LossWeights,
-    amp_dtype: torch.dtype | None = None,
-) -> MetricAccumulator:
-    model.eval()
-    accumulator = MetricAccumulator(loss_weights)
-    for _ in range(max(1, batches)):
-        batch = collate(
-            stream.sample_ruleset_aware_batch(split, batch_size, rng, board_weights, advance=False),
-            device,
-        )
-        _check_eval_batch(batch)
-        with _autocast(amp_dtype):
-            output = model(batch["board"], batch["rules"])
-            head_losses = compute_head_losses(output, batch)
-            total_loss = weighted_total_loss(head_losses, loss_weights)
-        accumulator.add_batch(output, batch, head_losses, total_loss)
-    return accumulator
-
-
-@torch.no_grad()
 def balanced_eval_loader(
     model: torch.nn.Module,
     loader_iter: Iterator[dict[str, torch.Tensor]],
@@ -460,10 +395,8 @@ def _write_run_config(
 
 
 def _stream_buffer_bytes(args: argparse.Namespace) -> int:
-    if args.stream_buffer_mb < 0.0:
-        raise ValueError("--stream-buffer-mb must be non-negative")
-    if args.stream_buffer_mb == 0.0:
-        return 0
+    if args.stream_buffer_mb <= 0.0:
+        raise ValueError("--stream-buffer-mb must be positive (the eager loading path was removed)")
     byte_count = int(args.stream_buffer_mb * 1024 * 1024)
     if byte_count <= 0:
         raise ValueError("--stream-buffer-mb is too small")
@@ -703,100 +636,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     data_paths = expand_data_paths(resolve_root_path(path) for path in args.data)
     _warn_deprecated_legacy_jsonl(data_paths)
-    if _stream_buffer_bytes(args) > 0:
-        _run_streaming(args, data_paths)
-        return
-    records = load_records(data_paths)
-    boards = board_sizes(args.boards, infer_board_sizes(records))
-    records = filter_records_by_boards(records, boards)
-    board_weights = board_sampling_weights(args.board_sampling_weights, boards)
-
-    train_rng = random.Random(args.seed)
-    val_rng = random.Random(args.seed + 20_000)
-    torch.manual_seed(args.seed)
-    train_records, val_records = split_records(records, args.val_fraction, train_rng)
-    if not train_records:
-        train_records = val_records
-    if not val_records:
-        val_records = train_records
-    train_groups = build_ruleset_groups(train_records)
-    val_groups = build_ruleset_groups(val_records)
-
-    device = training_device(args.device)
-    if device.type == "cuda":
-        torch.set_float32_matmul_precision("high")
-    model, model_config, start_step, resume_checkpoint = _prepare_model(args, boards, device)
-    loss_weights = _loss_weights(args)
-    amp_dtype = _amp_dtype(args, device)
-    optimizer = _make_optimizer(model, args, device)
-    scheduler = _make_scheduler(optimizer, args)
-    if resume_checkpoint is not None:
-        _restore_optimizer_state(optimizer, resume_checkpoint)
-        _restore_scheduler_state(scheduler, resume_checkpoint)
-        restore_rng_state(resume_checkpoint, train_rng, val_rng)
-
-    run_dir = make_run_dir(args.run_dir, args.resume or None)
-    metrics_path = run_dir / "metrics.csv"
-    if not args.resume or not metrics_path.exists():
-        write_metrics_header(metrics_path)
-    _write_run_config(
-        run_dir,
-        args,
-        data_paths,
-        len(records),
-        len(train_records),
-        len(val_records),
-        board_weights,
-        device,
-        model_config,
-        extra_config={
-            "data_loading": "eager_deprecated",
-            "data_pipeline": "torch_dataloader",
-            "data_format": data_format_label(data_paths),
-        },
-    )
-
-    pin = device.type == "cuda"
-    train_loader = make_batch_dataloader(
-        RulesetAwareBatchDataset(
-            train_groups,
-            args.batch_size,
-            train_rng,
-            board_weights,
-            augment_d4=args.augment_d4,
-        ),
-        pin_memory=pin,
-    )
-    val_loader = make_batch_dataloader(
-        RulesetAwareBatchDataset(
-            val_groups,
-            args.batch_size,
-            val_rng,
-            board_weights,
-        ),
-        pin_memory=False,
-    )
-    _run_training_loop(
-        args,
-        device,
-        boards,
-        model,
-        model_config,
-        optimizer,
-        scheduler,
-        loss_weights,
-        amp_dtype,
-        train_loader,
-        val_loader,
-        run_dir,
-        metrics_path,
-        start_step,
-        train_rng,
-        val_rng,
-    )
-
-    print(f"run_dir={run_dir}")
-    print(f"metrics={metrics_path}")
+    _run_streaming(args, data_paths)
 
 
 if __name__ == "__main__":
