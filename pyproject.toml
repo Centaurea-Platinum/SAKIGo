@@ -7,6 +7,9 @@ dependencies = [
     "pytest==9.0.2",
     "torch==2.11.0+cu128",
     "zstandard>=0.25.0",
+    "tensorboard>=2.20",
+    "tqdm>=4.66",
+    "triton-windows>=3.5; sys_platform == 'win32'",
 ]
 
 [tool.uv]
@@ -21,7 +24,7 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.pytest.ini_options]
-pythonpath = [".", "Model"]
-testpaths = ["Model", "Training"]
+pythonpath = ["."]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q"

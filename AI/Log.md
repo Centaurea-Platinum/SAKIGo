@@ -2,6 +2,36 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-06 - Post-cutover robustness review of sakigo/
+
+- Full manual read of the training/data/model/generate/eval surface (no subagents); suites green before and after (36 pytest incl. new test, 17 cargo).
+- Verdict: robust/standard/modern/modular — one real gap found and fixed: KataGo death mid-generation hung `run()` forever (`responses.get()` blocks; stdout reader exited silently on EOF). Reader now enqueues an `_engine_exited` sentinel with returncode + stderr tail; run() raises loudly. Regression test `test_katago_client_signals_engine_exit`.
+- Noted, not fixed (by design or minor): val metrics rotate through the val set across evaluations (comparable only in expectation); `run_phase1_suite` was not ported in the cutover — multi-spec sweeps need per-spec `python -m sakigo.train` invocations (user hit this: `python -m Training.run_phase1_suite` now exits 1).
+- Follow-up (same day, on request): added `--val-fixed` — freezes the first `val_batches` batches of the seeded val sampler (`FixedBatchSampler`) and replays them every eval for smooth step-to-step deltas; default stays rotating (unbiased, full coverage). Test: `test_val_fixed_replays_identical_batches`. 37 pytest green.
+
+## 2026-07-06 - P6 cutover executed (legacy stack deleted)
+
+- Owner approved ("lets cut!"). Deleted `Training/*.py` (12 modules) and `Model/` entirely; kept `Training/data` + `Training/runs`. Legacy checkpoints remain loadable — [test_legacy_checkpoints.py](../tests/test_legacy_checkpoints.py) pins the load+remap path.
+- Parity tests that needed the legacy oracle were converted to self-contained invariant tests (equivariance, spec sync, hash-split/round-trip/collate contract, engine binding invariants, generator perspective-flip/schema/quota/shard tests). 35/35 pytest green post-cutover; pyproject testpaths now just `tests/`.
+- Salvaged before deletion: the WDDM-aware batch-size sweep → [sakigo/train/benchmark.py](../sakigo/train/benchmark.py) (`python -m sakigo.train.benchmark`). adapters.py died with Model/ per the deferral decision (reimplement over the Rust encoder when Phase 2 is reconciled with D10).
+- Updated: root README (layout + commands), AI/Context.md (phase, implementation map, boundary now names `sakigo/`), RebuildPlan status → complete.
+- Rebuild summary across the day: ~8.5k-line legacy stack → `sakigo/` package (~4.3k lines incl. generator), one model implementation, one encoder implementation (Rust), torch.compile + TensorBoard, mmap shard data path, ≈ 2× training throughput.
+
+## 2026-07-06 - Rebuild P0–P5 implemented (new `sakigo/` package, all gates green)
+
+- Executed [RebuildPlan.md](RebuildPlan.md) through P5; 98/98 pytest (legacy suites untouched and green alongside the new gates in `tests/`).
+- **P0**: `sakigo/` scaffold + [CONTRACTS.md](../sakigo/CONTRACTS.md) (frozen record/forward/rule-encoding/checkpoint/run-dir contracts); verbatim ports of d4/losses/rulesets/constants with byte-parity tests.
+- **P1**: unified `SakiGoNet` (`group_size ∈ {1,8}`) replaces SakiGoModel+ScalarSakiGoModel (~690 dup lines): no forward-time caches (buffers + functional canonical-frame RoPE), SDPA `enable_gqa`. **Real trained model1+model2 checkpoints load (scalar via scripted remap) and reproduce outputs exactly**; equivariance suite ported. Specs: 590→~150-line JSON loader; packaged spec copies with a Design-sync test; configs identical to legacy parser.
+- **P2**: JSONL→mmap tensor shards (`sakigo/data/prepare.py`, decode+validate once), map-style `PreparedDataset` + `RulesetBalancedBatchSampler` + standard DataLoader (workers, pin_memory). Gates: split membership == legacy blake2b split, round-trip exact, collate layout == legacy, D4-augment parity.
+- **P3**: `Trainer` with torch.compile (default on, recorded fallback), bf16 autocast, fused AdamW, `SequentialLR`, TensorBoard + CSV mirror (Viewer-compatible), tqdm, atomic `weights_only=True` checkpoints + RNG capture, TOML/CLI config. GPU gate on real phase-1 data: compile works (triton-windows 3.7.1 + torch 2.11), ~140 samples/s steady vs ~70 legacy, loss trajectories match legacy A/B (both 13.0→10.3 in 200 steps). Fixed: seed at Trainer construction (init determinism).
+- **P4**: pyo3 binding activated (feature-gated; compiled first try), encoder exposed; wheel built via maturin (repo-local `CARGO_HOME` bypasses the unreachable rsproxy mirror; `Engine/.cargo/config.toml` documents it) and installed. Golden gate: Rust engine == legacy generator `Game` on random playouts across all 4 preset rulesets (legality/board/captures/planes/rule features/simple-ko).
+- **P5**: generator decomposed (`sakigo/generate/`: game/records/plan/writer/katago/run) onto the Rust engine; component parity gates (query/position-key/record construction/quotas/sharding) + **live KataGo run** (64 records @ ~112/s) fed back through validate→prepare→collate cleanly. `sakigo/eval/` = selfplay eval on the Rust engine (smoke-tested).
+- **Next: P6 cutover needs human approval** — delete legacy `Training/`+`Model/` (parity tests go with them), port `run_phase1_suite` sweep if still wanted, update READMEs/Design pointers + Context.md map, decide fate of smoke artifacts (`runs/rebuild_gpu_smoke`, `runs/gen_smoke`, `.tmp-smoke/`).
+
+## 2026-07-06 - Rebuild plan authored
+
+- Human asked for a ground-up rebuild plan (modularize/standardize/modernize: torch.compile, TensorBoard). Two thorough audits (Training/ ~5,600 ln, Model/ ~2,850 ln) fed [RebuildPlan.md](RebuildPlan.md): one installable `sakigo/` package; delete `StreamingJsonlBuffer`/`PinnedBatchKeeper`/CSV-metrics/hand CUDA-graphs in favor of standard Dataset+DataLoader, TensorBoard+tqdm, `SequentialLR`, `torch.compile`; unify scalar+equivariant stacks via a group-size parameter (~690 dup lines); shrink specs.py to JSON+schema; wire the Rust engine via pyo3 as the single rules/encoder impl (3 copies today). 14 preserved invariants + 6 gated phases (P1 gate = checkpoint output parity). Open items for human: pyo3 buildability, adapters.py deferral, wandb, dynamic board sizes under compile. No code touched.
+
 ## 2026-07-06 - Step-0 baseline checkpoint/metrics
 
 - Training now checkpoints and evaluates the *initialized* model at step 0 (fresh runs only, skipped on resume) and drops the step-1 special case: metric/checkpoint steps form an arithmetic sequence (0, interval, 2·interval, ...). Step-0 train columns are blank (no batches seen); val columns are real. Tests updated; 51 pytest green.

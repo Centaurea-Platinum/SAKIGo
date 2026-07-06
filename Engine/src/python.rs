@@ -1,19 +1,14 @@
-//! PyO3 bindings (PARKED, not compiled): expose the engine's game state to
-//! Python as `sakigo_engine.Game`, matching the vocabulary of the Phase 1
-//! generator's pure-Python `Game` (SAKIGo rule-name strings, BLACK=1/WHITE=-1
-//! ints, row-major point indices, pass = index `area`).
-//!
-//! This file is intentionally unreferenced from `lib.rs`: declaring the
-//! optional `pyo3` dependency breaks offline `cargo test` (lock resolution
-//! needs the registry), and the crates mirror was unreachable when this was
-//! written (2026-07-06). Wiring steps to activate it are in `AI/Issues.md`.
-//! NOTE: written against the pyo3 0.23 Bound API but never compiled - expect
-//! to fix small API mismatches on first build.
+//! PyO3 bindings: expose the engine's game state to Python as
+//! `sakigo_engine.Game`, matching the vocabulary of the Phase 1 generator's
+//! pure-Python `Game` (SAKIGo rule-name strings, BLACK=1/WHITE=-1 ints,
+//! row-major point indices, pass = index `area`). Compiled behind the
+//! `python` cargo feature; built with maturin.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::board::{Color, Point};
+use crate::encoder::EncodedPosition;
 use crate::game::{GameState, GoMove};
 use crate::rules::{KoRule, Ruleset, ScoringRule, SuicideRule};
 
@@ -141,10 +136,22 @@ impl PyGame {
     fn state_hash(&self) -> u128 {
         self.state.state_hash().0
     }
+
+    /// Plane-major `[6 * area]` f32 model input planes (mover perspective).
+    fn board_planes(&self) -> Vec<f32> {
+        EncodedPosition::from_state(&self.state).board_planes
+    }
+
+    /// The 10 rule features (one-hots + mover-signed komi/area, capture-diff/area).
+    fn rule_features(&self) -> Vec<f32> {
+        EncodedPosition::from_state(&self.state).rule_features.to_vec()
+    }
 }
 
 #[pymodule]
 fn sakigo_engine(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyGame>()?;
+    module.add("BOARD_PLANE_COUNT", crate::encoder::BOARD_PLANE_COUNT)?;
+    module.add("RULE_FEATURE_COUNT", crate::encoder::RULE_FEATURE_COUNT)?;
     Ok(())
 }

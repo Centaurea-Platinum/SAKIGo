@@ -13,3 +13,7 @@ Distillation/engine/
 Distillation/models/
 Training/data/
 Training/runs/
+runs/
+dist/
+.cargo-home/
+.tmp-smoke/

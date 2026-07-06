@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "sakigo-engine"
+version = "0.1.0"
+requires-python = ">=3.12"
+description = "SAKIGo Rust rules/encoding engine (pyo3 bindings)"
+
+[tool.maturin]
+features = ["python"]
+module-name = "sakigo_engine"

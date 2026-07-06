@@ -2,8 +2,8 @@ pub mod board;
 pub mod encoder;
 pub mod game;
 pub mod hash;
-// `python.rs` (PyO3 bindings) is parked and deliberately not compiled until
-// the crates registry is reachable; see AI/Issues.md for the wiring steps.
+#[cfg(feature = "python")]
+pub mod python;
 pub mod rules;
 
 pub use board::{Board, BoardError, Color, Group, Point, MAX_BOARD_SIZE, MIN_BOARD_SIZE};

@@ -7,8 +7,11 @@ license = "MIT"
 [lib]
 name = "sakigo_engine"
 path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
 
 [dependencies]
-# PyO3 binding is parked in src/python.rs: declaring `pyo3` as an optional
-# dependency breaks offline builds (lock resolution needs the registry), and
-# the crates mirror is currently unreachable. See AI/Issues.md.
+pyo3 = { version = "0.23", optional = true, features = ["extension-module", "abi3-py312"] }

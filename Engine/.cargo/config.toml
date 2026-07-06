@@ -1,0 +1,9 @@
+# The user-level cargo config (%USERPROFILE%\.cargo\config.toml) replaces
+# crates-io with rsproxy.cn, which is unreachable from this network
+# (2026-07-06). Workaround: build with a repo-local CARGO_HOME so that config
+# does not apply and the official crates.io index is used:
+#   $env:CARGO_HOME = "<repo>\.cargo-home"
+# The timeout bump below helps on this slow connection either way.
+[http]
+timeout = 600
+low-speed-limit = 1

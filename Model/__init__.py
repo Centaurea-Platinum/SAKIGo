@@ -1,1 +1,0 @@
-"""SAKIGo model package."""

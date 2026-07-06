@@ -11,27 +11,29 @@ SAKI currently stands for **SymmetryAwareKatago-DistillationImplementation**. SA
 The repo is no longer design-only. It now has:
 
 - `Design/`: concise source-of-truth design notes and model specs.
-- `Engine/`: a Rust rules and encoding crate.
-- `Model/`: a PyTorch model package with D4-equivariant and scalar-control variants.
-- `Distillation/`: local KataGo teacher assets and a phase sketch; downloaded engines/models are artifacts, not source.
+- `Engine/`: a Rust rules and encoding crate with a pyo3 Python binding (`sakigo_engine` wheel).
+- `sakigo/`: the rebuilt Python stack (2026-07-06 rebuild, see [RebuildPlan.md](RebuildPlan.md)) — model, data, train, generate, eval, engine subpackages plus [CONTRACTS.md](../sakigo/CONTRACTS.md).
+- `Distillation/`: local KataGo teacher assets; downloaded engines/models are artifacts, not source.
+- `Training/data`, `Training/runs`: pre-rebuild datasets and checkpoints (legacy code deleted at the P6 cutover; checkpoints still load via `sakigo.model.remap_legacy_scalar_state_dict`).
 
-Search, final scoring, end-of-game adjudication, self-play, and exact KataGo teacher projection are still not implemented.
+Search, final scoring/adjudication beyond Tromp-Taylor eval, self-play training, and exact KataGo teacher projection are still not implemented.
 
 ## Implementation map
 
-- [Engine/README.md](../Engine/README.md) - Rust rules/encoding engine. Owns board topology, captures, suicide, simple ko, positional superko, pass moves, history hashes, capture accounting, and feature encoding.
-- [Model/README.md](../Model/README.md) - PyTorch model package. Public API is `forward(board, rules)`, with outputs `wdl_logits`, `score`, `ownership_logits`, `policy_logits`, and `budget_logits`.
-- [Design/ModelSpecs/ModelSpecs.md](../Design/ModelSpecs/ModelSpecs.md) - JSON-compatible model specs consumed by `Model/sakigo_model/specs.py`. Defines `model1`, `model2`, and `model3` with reusable stem/head shape files.
-- [Model/sakigo_model/adapters.py](../Model/sakigo_model/adapters.py) - canonical game-state projections for SAKIGo and KataGo distillation scaffolding.
-- [Training/generate_katago_phase1.py](../Training/generate_katago_phase1.py) - KataGo Phase 1 data generator. Keeps concurrent games/positions in flight, writes schema-v1 numbered `.jsonl.zst` shards by default, and maps KataGo analysis output into SAKIGo heads.
-- [Training/train.py](../Training/train.py) - JSONL/ZSTD trainer for the current five heads. Default mode is bounded streaming with a 1024 MiB decoded-record buffer over PyTorch `IterableDataset` + `DataLoader`; pass `--stream-buffer-mb 0` only for deprecated eager loading. Accepts shard directories, globs, or multiple paths. Defaults include bf16 autocast on CUDA and fused AdamW; `--cuda-graphs` opts into full-step graph capture (single board size, fixed batch); `--augment-d4` applies random board symmetries for non-equivariant models; `--progress` renders a terminal progress bar.
-- [Training/run_phase1_suite.py](../Training/run_phase1_suite.py) - sequential Phase 1 suite: accepts shard directories/globs, sweeps batch size per model spec, then trains the selected specs with equal samples-seen budgets.
-- [Training/selfplay_eval.py](../Training/selfplay_eval.py) - paired color-reversed evaluation matches between checkpoint raw-policy players (or the random baseline), with Tromp-Taylor adjudication, Elo + Wilson CI, and JSONL/SGF game dumps. Reuses the generator's rules/encoding.
-- [pyproject.toml](../pyproject.toml) - Python environment; pinned to Python 3.12 and CUDA PyTorch `2.11.0+cu128`.
+- [Engine/README.md](../Engine/README.md) - Rust rules/encoding engine. Owns board topology, captures, suicide, simple ko, positional superko, pass moves, history hashes, capture accounting, and feature encoding. Python binding: build with a repo-local `CARGO_HOME` (see [Engine/.cargo/config.toml](../Engine/.cargo/config.toml)), `uvx maturin build --manifest-path Engine/Cargo.toml --release --out dist`, then `uv pip install dist/*.whl`.
+- [sakigo/CONTRACTS.md](../sakigo/CONTRACTS.md) - frozen cross-module contracts: record schema v1, board planes, rule features, model forward contract, loss semantics, hash split, checkpoint payload, run-dir layout.
+- `sakigo/model/` - unified `SakiGoNet` with `group_size ∈ {1, 8}` (scalar control = 1); no forward-time caches (torch.compile-clean); spec JSONs packaged in `sakigo/model/specs/` with a Design-sync test.
+- `sakigo/data/` - record validation, blake2b position split, JSONL(.zst) → mmap tensor shards (`prepare.py`), map-style `PreparedDataset` + `RulesetBalancedBatchSampler` + standard DataLoader, D4 augmentation.
+- `sakigo/train/` - `python -m sakigo.train`: torch.compile (default on), bf16 autocast, fused AdamW, SequentialLR warmup-cosine, TensorBoard + metrics.csv mirror (Viewer-compatible), tqdm, atomic `weights_only=True` checkpoints with RNG capture, TOML/CLI config. `python -m sakigo.train.benchmark` = WDDM-aware batch-size sweep.
+- `sakigo/generate/` - `python -m sakigo.generate`: Phase 1 KataGo teacher generation on the Rust engine (client/plan/records/writer/run modules), zstd shards + status.json.
+- `sakigo/eval/` - `python -m sakigo.eval`: paired color-reversed policy matches, Tromp-Taylor adjudication, Elo + Wilson CI, JSONL/SGF dumps.
+- [pyproject.toml](../pyproject.toml) - Python 3.12, CUDA PyTorch `2.11.0+cu128`, tensorboard, tqdm, triton-windows (torch.compile works on this machine).
+
+- [Design/ModelSpecs/ModelSpecs.md](../Design/ModelSpecs/ModelSpecs.md) - JSON-compatible model specs; `sakigo/model/specs.py` consumes packaged copies kept in sync by test. Defines `model1`, `model2`, and `model3` with reusable stem/head shape files.
 
 ## Boundary
 
-AI collaborators may write freely inside `AI/`. Do not modify `Design/`, `Model/`, `Engine/`, `README.md`, or other non-AI files unless the human explicitly asks. The human did explicitly ask on 2026-07-03 to maintain the worktree and reconcile AI notes with current docs/code.
+AI collaborators may write freely inside `AI/`. Do not modify `Design/`, `sakigo/`, `Engine/`, `README.md`, or other non-AI files unless the human explicitly asks. The human did explicitly ask on 2026-07-03 to maintain the worktree and reconcile AI notes with current docs/code, and on 2026-07-06 to implement the rebuild plan (including the P6 cutover).
 
 Keep the AI notes current without waiting to be prompted: when code, design docs, READMEs, or project direction change, update `AI/Context.md`, `AI/Decisions.md`, `AI/Issues.md`, and `AI/Log.md` in the same working session.
 
