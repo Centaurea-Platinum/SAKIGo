@@ -2,6 +2,21 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-07 - Register width decoupled from trunk width
+
+- Created branch `codex-register-width-support` after the repo could not create a slash-nested `codex/...` branch under the local refs/sandbox layout.
+- Added `register_channels`, `register_bottleneck_channels`, and `register_head_dim` to `SakiGoModelConfig`; old checkpoints/specs default to the prior full-width register behavior.
+- Updated `SakiGoNet` and `TrunkBlock` so register seed/rule MLP/global heads use `register_channels`, while gather/broadcast cross-attention uses rectangular projections between board width and register width.
+- Updated Design + packaged ModelSpecs/StemShapes/HeadShapes: `register_channel` and `register_bottleneck_channel` are first-class spec fields; `model2`/`model3` now use 128-wide trunks, 64-wide registers, and 32-wide register cross-attention. Parameter counts: `model1` 332,238 unchanged; `model2`/`model3` 8,426,602 -> 6,585,578.
+- Tests added/updated for narrow-register specs and rectangular-register equivariance. Verification: targeted specs/model/legacy checkpoint tests passed (`17 passed`); full suite passed (`44 passed in 272.16s`).
+
+## 2026-07-07 - Extracted reusable equivariant attention library
+
+- Added `equivariant_attention/`: a torch-only finite-group regular-representation attention package with `FiniteGroupSpec`, trivial/Cn/D4 square-grid presets, regular linear/norm/MLP layers, invariant pooling, spatial self-attention, and spatial/register cross-attention. Included a short README with shapes and usage.
+- Rewired `sakigo.model.group` and `sakigo.model.layers` to consume the library through compatibility wrappers, preserving SAKIGo's old class names, tensor contracts, and state-dict parameter layout.
+- Added `tests/test_equivariant_attention_library.py`: D4 table compatibility, D4 regular-linear equivariance, D4 attention equivariance, C4 attention reuse, and spatial/register cross-attention equivariance.
+- Verification: focused equivariance tests passed (`8 passed`); full suite passed with a fresh temp dir (`42 passed in 255.71s`). First full-suite attempt failed only because Windows denied cleanup of the pre-existing `.pytest-tmp` directory.
+
 ## 2026-07-06 - Post-cutover robustness review of sakigo/
 
 - Full manual read of the training/data/model/generate/eval surface (no subagents); suites green before and after (36 pytest incl. new test, 17 cargo).

@@ -48,8 +48,9 @@ class SakiGoNet(nn.Module):
 
         self.lift = GroupLift(group_size)
         self.stem = GroupPointwiseMLP(self.config.stem_channels, group_size)
+        register_channels = self._register_channels()
         self.register_seed = nn.Parameter(
-            torch.zeros(self.config.register_count, self.config.trunk_channels)
+            torch.zeros(self.config.register_count, register_channels)
         )
         nn.init.normal_(self.register_seed, mean=0.0, std=0.02)
         self.rule_mlp = scalar_mlp(self.config.rule_mlp_channels)
@@ -60,11 +61,14 @@ class SakiGoNet(nn.Module):
             [
                 TrunkBlock(
                     trunk_channels=self.config.trunk_channels,
+                    register_channels=register_channels,
                     bottleneck_channels=self.config.bottleneck_channels,
+                    register_bottleneck_channels=self._register_bottleneck_channels(),
                     board_size=self.config.board_size,
                     q_heads=self.config.q_heads,
                     kv_heads=self.config.kv_heads,
                     head_dim=self.config.head_dim,
+                    register_head_dim=self._register_head_dim(),
                     global_rope_frequencies=self.config.global_rope_frequencies,
                     local_rope_frequencies=self.config.local_rope_frequencies,
                     block_count=self.config.block_count,
@@ -118,8 +122,19 @@ class SakiGoNet(nn.Module):
             else set(self.config.gather_blocks)
         )
 
+    def _register_channels(self) -> int:
+        return self.config.register_channels or self.config.trunk_channels
+
+    def _register_bottleneck_channels(self) -> int:
+        return self.config.register_bottleneck_channels or self.config.bottleneck_channels
+
+    def _register_head_dim(self) -> int:
+        return self.config.register_head_dim or (
+            self._register_bottleneck_channels() // self.config.q_heads
+        )
+
     def _register_input_channels(self) -> int:
-        register_input = self.config.register_count * self.config.trunk_channels
+        register_input = self.config.register_count * self._register_channels()
         if (
             self.config.expanded_channel is not None
             and self.config.expanded_channel != self.config.trunk_channels
@@ -135,11 +150,13 @@ class SakiGoNet(nn.Module):
             raise ValueError("rule_dim must match the first rule MLP channel")
         register_input = self._register_input_channels()
         if config.rule_mlp_channels[-1] != register_input:
-            raise ValueError("rule MLP output must equal register_count * trunk_channels")
+            raise ValueError("rule MLP output must equal register_count * register_channels")
         if config.stem_channels[-1] != config.trunk_channels:
             raise ValueError("stem output must match trunk_channels")
         if config.q_heads * config.head_dim != config.bottleneck_channels:
             raise ValueError("q_heads * head_dim must match bottleneck_channels")
+        if config.q_heads * self._register_head_dim() != self._register_bottleneck_channels():
+            raise ValueError("q_heads * register_head_dim must match register_bottleneck_channels")
         if config.q_heads % config.kv_heads != 0:
             raise ValueError("q_heads must be divisible by kv_heads")
         rope_frequency_count = len(config.global_rope_frequencies) + len(config.local_rope_frequencies)
@@ -147,6 +164,19 @@ class SakiGoNet(nn.Module):
             raise ValueError("at least one global or local RoPE frequency is required")
         if config.head_dim < 4 * rope_frequency_count:
             raise ValueError("head_dim must be at least 4 * total RoPE frequency count")
+        if self._register_head_dim() < 4 * rope_frequency_count:
+            raise ValueError("register_head_dim must be at least 4 * total RoPE frequency count")
+        for label, channels, expected in (
+            ("wdl_channels", config.wdl_channels, register_input),
+            ("score_channels", config.score_channels, register_input),
+            ("policy_pass_channels", config.policy_pass_channels, register_input),
+            ("budget_pass_channels", config.budget_pass_channels, register_input),
+            ("ownership_channels", config.ownership_channels, config.trunk_channels),
+            ("policy_channels", config.policy_channels, config.trunk_channels),
+            ("budget_channels", config.budget_channels, config.trunk_channels),
+        ):
+            if channels is not None and channels[0] != expected:
+                raise ValueError(f"{label} must start with {expected} input channels")
         for label, outputs in (
             ("score_outputs", config.score_outputs),
             ("ownership_outputs", config.ownership_outputs),
@@ -173,7 +203,7 @@ class SakiGoNet(nn.Module):
         rule_delta = self.rule_mlp(rules).reshape(
             batch_size,
             self.config.register_count,
-            self.config.trunk_channels,
+            self._register_channels(),
         )
         registers = seed + rule_delta
         return registers.unsqueeze(-1).expand(-1, -1, -1, self.group_size).contiguous()
@@ -182,7 +212,7 @@ class SakiGoNet(nn.Module):
         return registers.reshape(
             batch_size,
             1,
-            self.config.register_count * self.config.trunk_channels,
+            self.config.register_count * self._register_channels(),
             self.group_size,
         )
 

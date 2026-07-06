@@ -43,6 +43,18 @@ def test_all_specs_build(name: str) -> None:
     assert config.board_size == 32
 
 
+def test_model2_uses_narrower_register_stream() -> None:
+    config = config_from_spec("model2")
+    assert config.trunk_channels == 128
+    assert config.register_channels == 64
+    assert config.bottleneck_channels == 64
+    assert config.register_bottleneck_channels == 32
+    assert config.register_head_dim == 16
+    assert config.rule_mlp_channels[-1] == config.register_count * config.register_channels
+    assert config.wdl_channels is not None
+    assert config.wdl_channels[0] == config.register_count * config.register_channels
+
+
 def test_default_model_is_model1() -> None:
     assert config_from_spec() == config_from_spec("model1")
 

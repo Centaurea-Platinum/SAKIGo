@@ -28,10 +28,13 @@ class SakiGoModelConfig:
     register_count: int = 2
     trunk_channels: int = 32
     expanded_channel: int | None = None
+    register_channels: int | None = None
     bottleneck_channels: int = 16
+    register_bottleneck_channels: int | None = None
     q_heads: int = 2
     kv_heads: int = 1
     head_dim: int = 8
+    register_head_dim: int | None = None
     global_rope_frequencies: tuple[float, ...] = (pi,)
     local_rope_frequencies: tuple[float, ...] = (pi / 2,)
     gather_blocks: tuple[int, ...] | None = None

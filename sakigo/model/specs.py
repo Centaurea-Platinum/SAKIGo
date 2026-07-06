@@ -185,20 +185,30 @@ def config_from_spec(
 
     register_count = int(trunk["register_count"])
     expanded_channel = int(trunk["expanded_channel"])
+    register_channels = int(trunk.get("register_channel", expanded_channel))
     bottleneck_channels = int(trunk["bottleneck_channel"])
+    register_bottleneck_channels = int(
+        trunk.get("register_bottleneck_channel", bottleneck_channels)
+    )
     q_heads = int(trunk["q_heads"])
     kv_heads = int(trunk["kv_heads"])
     if bottleneck_channels % q_heads != 0:
         raise ValueError("bottleneck_channel must be divisible by q_heads")
+    if register_bottleneck_channels % q_heads != 0:
+        raise ValueError("register_bottleneck_channel must be divisible by q_heads")
     head_dim = bottleneck_channels // q_heads
+    register_head_dim = register_bottleneck_channels // q_heads
 
     context: dict[str, float] = {
         "register_count": register_count,
         "expanded_channel": expanded_channel,
+        "register_channel": register_channels,
         "bottleneck_channel": bottleneck_channels,
+        "register_bottleneck_channel": register_bottleneck_channels,
         "q_heads": q_heads,
         "kv_heads": kv_heads,
         "head_dim": head_dim,
+        "register_head_dim": register_head_dim,
     }
 
     stem_shape = _shape(specs, spec, "stem_shapes", "stem_shape")
@@ -255,10 +265,13 @@ def config_from_spec(
         register_count=register_count,
         trunk_channels=expanded_channel,
         expanded_channel=expanded_channel,
+        register_channels=register_channels,
         bottleneck_channels=bottleneck_channels,
+        register_bottleneck_channels=register_bottleneck_channels,
         q_heads=q_heads,
         kv_heads=kv_heads,
         head_dim=head_dim,
+        register_head_dim=register_head_dim,
         global_rope_frequencies=global_frequencies,
         local_rope_frequencies=local_frequencies,
         gather_blocks=gather_blocks,

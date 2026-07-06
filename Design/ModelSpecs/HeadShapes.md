@@ -3,14 +3,14 @@
   "schema_version": 1,
   "notes": [
     "global_shape and spatial_shape describe full pointwise MLP channel tuples.",
-    "expanded_channel is m from ModelArchitecture.md; bottleneck_channel is n.",
+    "expanded_channel is m from ModelArchitecture.md; register_channel is the register-stream width; bottleneck_channel is n.",
     "Use output as the per-head output-width placeholder.",
     "pass_policy and pass_budget are global heads whose logits are appended to the matching spatial action logits."
   ],
   "head_shapes": {
     "standard_v1": {
       "spatial_shape": ["expanded_channel", "expanded_channel", 8, "output"],
-      "global_shape": ["expanded_channel * register_count", "expanded_channel * register_count / 2", 8, "output"],
+      "global_shape": ["register_channel * register_count", "register_channel * register_count / 2", 8, "output"],
       "collapse": "mean_d4_axis",
       "global_heads": {
         "wdl": 4,

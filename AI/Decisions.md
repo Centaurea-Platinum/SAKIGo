@@ -2,6 +2,14 @@
 
 The *why* behind design choices, so later sessions don't relitigate settled ground or lose the reasoning. Newest first. Entries are living until built, then they freeze.
 
+## D25 - Register stream can be narrower than the board trunk (2026-07-07)
+
+Model specs now split board/trunk width from register width: `expanded_channel` remains the spatial trunk width, while `register_channel` controls per-register features and `register_bottleneck_channel` controls register gather/broadcast attention width. Cross-attention uses rectangular projections, so registers can query/broadcast with different input/output widths. `model1` stays full-width (32/32) for the small baseline; `model2` and `model3` now use 128-wide board trunks with 64-wide registers and 32-wide register cross-attention. **Why:** register gather/broadcast was a large parameter bucket; narrower registers keep the global readout path while reducing the cost of treating registers as a full-width copy of the spatial stream. Source: user discussion and implementation on 2026-07-07.
+
+## D24 - Equivariant attention is a reusable finite-group library (2026-07-07)
+
+The regular-representation attention machinery has been generalized and decoupled into `equivariant_attention/`: `FiniteGroupSpec` plus trivial/Cn/D4 square-grid presets, regular linear/norm/MLP layers, invariant pooling, spatial self-attention, and spatial/register cross-attention. `sakigo.model.group` and `sakigo.model.layers` now act as SAKIGo-compatible wrappers around that package, preserving old class names and state-dict shapes. **Why:** the useful object is not Go-specific; it is finite-group equivariant attention with canonical-frame position encoding, and keeping it as a small torch-only library makes it reusable across future board/grid projects without copying the algebra and attention code. Source: user request and implementation on 2026-07-07.
+
 ## D23 - Large training data uses zstd JSONL shards and a DataLoader streaming buffer (2026-07-03, updated 2026-07-05)
 
 `Training.train` now defaults to bounded streaming (`--stream-buffer-mb 1024`) through PyTorch `IterableDataset` + `DataLoader` wrappers. The preferred data layout is numbered `.jsonl.zst` shards such as `samples_000000.jsonl.zst`; plain single `.jsonl` remains readable but is marked deprecated, and eager loading is only available with `--stream-buffer-mb 0`. Streaming scans metadata once, splits positions deterministically by hash, keeps decoded records under the requested buffer budget, and collates homogeneous/ruleset-balanced batches through DataLoader. **Why:** the 2^18 Phase 1 file is too large as expanded Python objects, while zstd shards avoid bloated individual files and make data management cleaner. Source: [train.py](../Training/train.py), [data.py](../Training/data.py), [generate_katago_phase1.py](../Training/generate_katago_phase1.py).

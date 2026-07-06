@@ -83,6 +83,37 @@ def test_unified_scalar_model_is_not_equivariant() -> None:
     )
 
 
+def test_rectangular_register_model_is_equivariant() -> None:
+    torch.manual_seed(6)
+    config = NewConfig(
+        architecture="SakiGoModel",
+        **{
+            **_SMALL,
+            "register_channels": 8,
+            "register_bottleneck_channels": 16,
+            "register_head_dim": 8,
+            "rule_mlp_channels": (10, 16, 16),
+        },
+    )
+    model = SakiGoNet(config).eval()
+    board, rules = _inputs(2, 9)
+    with torch.no_grad():
+        base = model(board, rules)
+        transformed = model(new_d4.transform_board(board, 1), rules)
+    torch.testing.assert_close(
+        transformed["wdl_logits"],
+        base["wdl_logits"],
+        rtol=1e-4,
+        atol=1e-4,
+    )
+    torch.testing.assert_close(
+        transformed["ownership_logits"],
+        new_d4.transform_policy_logits(base["ownership_logits"], 1, 9),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+
 def test_forward_backward_and_state_dict_hygiene() -> None:
     model = SakiGoNet(NewConfig(architecture="SakiGoModel", **_SMALL))
     board, rules = _inputs(2, 7)
