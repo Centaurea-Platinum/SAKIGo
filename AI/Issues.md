@@ -16,10 +16,10 @@ Classified so later sessions know what is unsettled. Tags: **[Gap]** missing spe
 
 ## Gaps — spec not yet written
 
-- **[Open] Model sizing is now concrete but not validated.** `model1` and `model2` are specified in [ModelSpecs.md](../Design/ModelSpecs/ModelSpecs.md) and implemented in `Model/`. The open question is no longer "what are the first sizes?" but whether these sizes train well at scale.
+- **[Open] Model sizing is now concrete but not validated.** `non-bottleneck`, `plain`, and `swiglu` are specified in [ModelSpecs.json](../sakigo/model/specs/ModelSpecs.json) and implemented in `sakigo/model/`. The open question is no longer "what are the first sizes?" but whether these sizes train well at scale.
 - **[Open] Equivariant attention is implemented, but training evidence is still open.** `SakiGoModel` now adapts the SquareAccumulation reference: regular-rep board/register fibers, equivariant QKV/channel mixing, canonical-frame RoPE, gather, broadcast, and group-axis-collapsed heads. Tests cover equivariance and shape behavior. The training side is now ready: [run_phase1_suite.py](../Training/run_phase1_suite.py) trains the selected model specs with equal samples-seen budgets. Remaining: run it at scale and judge by evals, not val loss alone. (D13, D14, D18, D19)
-- **[Open] FiLM remains reserve/add-on only.** Register-seeded rule conditioning is implemented; no FiLM module exists in the current model code. Keep the open question limited to whether future data shows a need for multiplicative rule gating, and if so where it enters.
-- **[Open] Register read/write schedule and parameter cost.** Register width is now decoupled from board-trunk width (D25), reducing `model2`/`model3` parameter cost, but the gather/broadcast schedule is still empirical and should be revisited after real training measurements.
+- **[Open] FiLM remains reserve/add-on only.** Rule-conditioned register initialization is implemented; no FiLM module exists in the current model code. Keep the open question limited to whether future data shows a need for multiplicative rule gating, and if so where it enters.
+- **[Open] Register read/write schedule and parameter cost.** Register width is now decoupled from board-trunk width (D25), reducing the current 128-wide experiment specs' register cost, but the gather/broadcast schedule is still empirical and should be revisited after real training measurements.
 - **[Gap] Search undefined.** `../Design/Search/` currently only contains a Gumbel MuZero / policy-improvement-by-planning PDF reference — SAKIGo's own algorithm (MCTS?) and how the budget head's prior feeds it are unspecified. Author has flagged a **PUCT redesign**; candidate directions below.
 
   *Search landscape (reference, 2026-06-17), most relevant first:*
@@ -42,7 +42,7 @@ Classified so later sessions know what is unsettled. Tags: **[Gap]** missing spe
 
 - **[Open] Auxiliary horizon.** The n in g(x_t) = f(x_{t+n}) is unspecified — one horizon or several, and which heads get auxiliaries? (D8)
 - **[Open] Percentile-score granularity.** Number and spacing of percentile bins is TBD. (D7)
-- **[Open] Optional FiLM add-on sites.** If register seeding is not enough, decide how many FiLM sites to add and where their bias+scale enters the trunk. (D2)
+- **[Open] Optional FiLM add-on sites.** If direct register initialization is not enough, decide how many FiLM sites to add and where their bias+scale enters the trunk. (D2)
 
 ## Nits
 

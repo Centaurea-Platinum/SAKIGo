@@ -1,7 +1,7 @@
 Go's ruleset is very complicated. Furthermore, it does not map neatly to a hypercube, as some rules naturally excludes others. Thus, only a subset of rules are used to avoid overhead and rare sampling, and a one-hot encoding for correlated rules are used.
 The actual structure of a single one-hot will be something like [1,0,0], [0,1,0], or [0,0,1], but for simplicity, I will be recording them as an enumeration(1,2,3).
-The one-hot vectors are concatenated with normalized scalar inputs. They will seed register tokens by default. FiLM bias/scale injection may be added later if needed. Specific implementation:
-    Feed into MLP(s) to initialize register tokens
+The one-hot vectors are concatenated with normalized scalar inputs. They directly initialize register tokens through an MLP by default. FiLM bias/scale injection may be added later if needed. Specific implementation:
+    Feed into MLP(s) to initialize register tokens directly
     Feed into two MLP for each FiLM(bias+scale) injection site.
 
 Scoring:

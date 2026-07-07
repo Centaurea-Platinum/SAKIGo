@@ -58,7 +58,6 @@ def optimizer_param_groups(model: nn.Module, weight_decay: float) -> list[dict[s
             parameter.ndim < 2
             or name.endswith(".bias")
             or "norm" in lower_name
-            or name == "register_seed"
         ):
             no_decay.append(parameter)
         else:

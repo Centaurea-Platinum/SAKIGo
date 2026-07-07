@@ -9,8 +9,8 @@ def remap_legacy_scalar_state_dict(state: dict[str, torch.Tensor]) -> dict[str, 
     """Map a legacy ScalarSakiGoModel state dict onto the unified group_size=1 SakiGoNet.
 
     The only shape difference is ScalarLinear1x1 weights [out, in] becoming
-    GroupLinear1x1 weights [out, in, 1]. rule_mlp (nn.Linear) and register_seed
-    stay 2-D and must not be touched.
+    GroupLinear1x1 weights [out, in, 1]. rule_mlp (nn.Linear) stays 2-D and
+    must not be touched.
     """
     remapped: dict[str, torch.Tensor] = {}
     for key, value in state.items():

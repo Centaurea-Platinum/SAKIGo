@@ -10,7 +10,7 @@ SAKI currently stands for **SymmetryAwareKatago-DistillationImplementation**. SA
 
 The repo is no longer design-only. It now has:
 
-- `Design/`: concise source-of-truth design notes and model specs.
+- `Design/`: concise source-of-truth design notes.
 - `Engine/`: a Rust rules and encoding crate with a pyo3 Python binding (`sakigo_engine` wheel).
 - `equivariant_attention/`: reusable torch-only finite-group regular-representation attention library extracted from the SAKIGo model code; SAKIGo consumes it through compatibility wrappers.
 - `sakigo/`: the rebuilt Python stack (2026-07-06 rebuild, see [RebuildPlan.md](RebuildPlan.md)) — model, data, train, generate, eval, engine subpackages plus [CONTRACTS.md](../sakigo/CONTRACTS.md).
@@ -24,14 +24,14 @@ Search, final scoring/adjudication beyond Tromp-Taylor eval, self-play training,
 - [Engine/README.md](../Engine/README.md) - Rust rules/encoding engine. Owns board topology, captures, suicide, simple ko, positional superko, pass moves, history hashes, capture accounting, and feature encoding. Python binding: build with a repo-local `CARGO_HOME` (see [Engine/.cargo/config.toml](../Engine/.cargo/config.toml)), `uvx maturin build --manifest-path Engine/Cargo.toml --release --out dist`, then `uv pip install dist/*.whl`.
 - [equivariant_attention/](../equivariant_attention) - reusable finite-group equivariant attention package. Provides `FiniteGroupSpec`, trivial/Cn/D4 square-grid presets, regular-representation linear/norm/MLP layers, invariant pooling, spatial self-attention, and spatial/register cross-attention. Tensor shapes: spatial `[B,C,G,H,W]`, registers `[B,R,C,G]`.
 - [sakigo/CONTRACTS.md](../sakigo/CONTRACTS.md) - frozen cross-module contracts: record schema v1, board planes, rule features, model forward contract, loss semantics, hash split, checkpoint payload, run-dir layout.
-- `sakigo/model/` - unified `SakiGoNet` with `group_size ∈ {1, 8}` (scalar control = 1); no forward-time caches (torch.compile-clean); spec JSONs packaged in `sakigo/model/specs/` with a Design-sync test. The D4 attention primitives are compatibility wrappers over `equivariant_attention`; register width can now differ from trunk width.
+- `sakigo/model/` - unified `SakiGoNet` with `group_size ∈ {1, 8}` (scalar control = 1); no forward-time caches (torch.compile-clean); model specs live as packaged JSON in `sakigo/model/specs/`. The D4 attention primitives are compatibility wrappers over `equivariant_attention`; register width can now differ from trunk width.
 - `sakigo/data/` - record validation, blake2b position split, JSONL(.zst) → mmap tensor shards (`prepare.py`), map-style `PreparedDataset` + `RulesetBalancedBatchSampler` + standard DataLoader, D4 augmentation.
 - `sakigo/train/` - `python -m sakigo.train`: torch.compile (default on), bf16 autocast, fused AdamW, SequentialLR warmup-cosine, TensorBoard + metrics.csv mirror (Viewer-compatible), tqdm, atomic `weights_only=True` checkpoints with RNG capture, TOML/CLI config. `python -m sakigo.train.benchmark` = WDDM-aware batch-size sweep.
 - `sakigo/generate/` - `python -m sakigo.generate`: Phase 1 KataGo teacher generation on the Rust engine (client/plan/records/writer/run modules), zstd shards + status.json.
 - `sakigo/eval/` - `python -m sakigo.eval`: paired color-reversed policy matches, Tromp-Taylor adjudication, Elo + Wilson CI, JSONL/SGF dumps.
 - [pyproject.toml](../pyproject.toml) - Python 3.12, CUDA PyTorch `2.11.0+cu128`, tensorboard, tqdm, triton-windows (torch.compile works on this machine).
 
-- [Design/ModelSpecs/ModelSpecs.md](../Design/ModelSpecs/ModelSpecs.md) - JSON-compatible model specs; `sakigo/model/specs.py` consumes packaged copies kept in sync by test. Defines `model1`, `model2`, and `model3` with reusable stem/head shape files; `register_channel` / `register_bottleneck_channel` decouple register-stream width from `expanded_channel` / `bottleneck_channel`.
+- [sakigo/model/specs/ModelSpecs.json](../sakigo/model/specs/ModelSpecs.json) - JSON model specs consumed by `sakigo/model/specs.py`. Defines `non-bottleneck`, `plain`, and `swiglu` experiment specs with reusable stem/head shape files; `register_channel` / `register_bottleneck_channel` decouple register-stream width from `expanded_channel` / `bottleneck_channel`.
 
 ## Boundary
 
@@ -53,7 +53,7 @@ Keep the AI notes current without waiting to be prompted: when code, design docs
 
 **Input - how a position is encoded**
 - [BoardInput.md](../Design/Input/BoardInput.md) - six board planes: MyStones, OpponentStones, EmptyPositions, BoundaryCorner, BoundaryEdge, NonTrivialIllegal.
-- [NonBoardInput.md](../Design/Input/NonBoardInput.md) - rule one-hots plus normalized komi and capture-difference scalars. Default path seeds register tokens; FiLM is optional future plumbing.
+- [NonBoardInput.md](../Design/Input/NonBoardInput.md) - rule one-hots plus normalized komi and capture-difference scalars. The rule MLP directly initializes register tokens; FiLM is optional future plumbing.
 - [Markov.md](../Design/Input/Markov.md) - the neural input is lossy, but the engine keeps history/hash state and exposes legality through encoding.
 
 **Architecture - the network**

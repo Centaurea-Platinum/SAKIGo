@@ -7,6 +7,8 @@ sakigo.model.checkpoints.remap_legacy_scalar_state_dict.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import torch
 from torch import nn
 
@@ -49,10 +51,6 @@ class SakiGoNet(nn.Module):
         self.lift = GroupLift(group_size)
         self.stem = GroupPointwiseMLP(self.config.stem_channels, group_size)
         register_channels = self._register_channels()
-        self.register_seed = nn.Parameter(
-            torch.zeros(self.config.register_count, register_channels)
-        )
-        nn.init.normal_(self.register_seed, mean=0.0, std=0.02)
         self.rule_mlp = scalar_mlp(self.config.rule_mlp_channels)
 
         gather_blocks = self._gather_blocks()
@@ -77,6 +75,7 @@ class SakiGoNet(nn.Module):
                     enable_gather=index + 1 in gather_blocks,
                     enable_broadcast=index + 1 in broadcast_blocks,
                     activation=self.config.activation,
+                    mlp_variant=self.config.trunk_mlp_variant,
                 )
                 for index in range(self.config.block_count)
             ]
@@ -148,6 +147,8 @@ class SakiGoNet(nn.Module):
             raise ValueError("input_planes must match the first stem channel")
         if config.rule_dim != config.rule_mlp_channels[0]:
             raise ValueError("rule_dim must match the first rule MLP channel")
+        if config.trunk_mlp_variant.strip().lower() not in {"plain", "swiglu"}:
+            raise ValueError("trunk_mlp_variant must be 'plain' or 'swiglu'")
         register_input = self._register_input_channels()
         if config.rule_mlp_channels[-1] != register_input:
             raise ValueError("rule MLP output must equal register_count * register_channels")
@@ -199,14 +200,22 @@ class SakiGoNet(nn.Module):
 
     def initial_registers(self, rules: torch.Tensor) -> torch.Tensor:
         batch_size = rules.shape[0]
-        seed = self.register_seed.to(device=rules.device, dtype=rules.dtype).unsqueeze(0)
-        rule_delta = self.rule_mlp(rules).reshape(
+        registers = self.rule_mlp(rules).reshape(
             batch_size,
             self.config.register_count,
             self._register_channels(),
         )
-        registers = seed + rule_delta
         return registers.unsqueeze(-1).expand(-1, -1, -1, self.group_size).contiguous()
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        if "register_seed" in state_dict:
+            cleaned_state = OrderedDict(state_dict)
+            cleaned_state.pop("register_seed")
+            metadata = getattr(state_dict, "_metadata", None)
+            if metadata is not None:
+                cleaned_state._metadata = metadata
+            state_dict = cleaned_state
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def _merged_registers(self, registers: torch.Tensor, batch_size: int) -> torch.Tensor:
         return registers.reshape(

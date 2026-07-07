@@ -68,6 +68,25 @@ def test_unified_regular_model_is_equivariant() -> None:
                 )
 
 
+def test_swiglu_trunk_model_is_equivariant() -> None:
+    torch.manual_seed(7)
+    model = SakiGoNet(
+        NewConfig(architecture="SakiGoModel", trunk_mlp_variant="swiglu", **_SMALL)
+    ).eval()
+    size = 9
+    board, rules = _inputs(2, size)
+    with torch.no_grad():
+        base = model(board, rules)
+        transformed = model(new_d4.transform_board(board, 1), rules)
+    torch.testing.assert_close(transformed["wdl_logits"], base["wdl_logits"], rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(
+        transformed["ownership_logits"],
+        new_d4.transform_policy_logits(base["ownership_logits"], 1, size),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+
 def test_unified_scalar_model_is_not_equivariant() -> None:
     torch.manual_seed(4)
     model = SakiGoNet(NewConfig(architecture="ScalarSakiGoModel", **_SMALL)).eval()

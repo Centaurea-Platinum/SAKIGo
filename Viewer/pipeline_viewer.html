@@ -206,7 +206,7 @@ const NODES = [
     inv:["spatial heads equivariant, global heads invariant", "raw logits in training — legality masking is inference-only",
          "RegularLinear1x1 caches flattened kernels only for frozen (requires_grad=False) params"] },
   { lane:"train", id:"loss", t:"Losses + optimizer", s:"losses.py · AdamW (fused)",
-    role:"Masked soft-CE (wdl/policy/budget), smooth-L1 (score), BCE (ownership); branchless masks normalize by clamped weight sums. AdamW with no-decay group for biases/norms/register_seed; warmup-cosine or constant LR.",
+    role:"Masked soft-CE (wdl/policy/budget), smooth-L1 (score), BCE (ownership); branchless masks normalize by clamped weight sums. AdamW with no-decay group for biases/norms; warmup-cosine or constant LR.",
     inputs:["model outputs + batch targets/masks"], outputs:["weighted total loss", "per-head losses"],
     inv:["no illegal-move masking at train time", "all-false mask contributes 0 loss with zero gradients"] },
   { lane:"train", id:"ckpt", t:"Checkpoints + metrics", s:"checkpoints.py · metrics.csv",

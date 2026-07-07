@@ -23,7 +23,7 @@ class TrainConfig:
     board_weights: dict[int, float] | None = None
     augment_d4: bool = False
     # model
-    model_spec: str = "model1"
+    model_spec: str = "plain"
     # optimization
     steps: int = 1000
     batch_size: int = 64

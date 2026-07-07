@@ -6,7 +6,7 @@ spills them into shared system memory and runs them at paging speed (that
 spill never raises OutOfMemoryError).
 
 Usage:
-  uv run python -m sakigo.train.benchmark --prepared-dir <dir> --spec model1
+  uv run python -m sakigo.train.benchmark --prepared-dir <dir> --spec plain
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ def benchmark_batch_size(
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Sweep batch sizes for a model spec.")
     parser.add_argument("--prepared-dir", type=Path, required=True)
-    parser.add_argument("--spec", default="model1")
+    parser.add_argument("--spec", default="plain")
     parser.add_argument("--batch-sizes", default="8,16,24,32,48,64,96,128")
     parser.add_argument("--timed-steps", type=int, default=8)
     parser.add_argument("--budget-fraction", type=float, default=0.85)

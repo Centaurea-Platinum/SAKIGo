@@ -54,9 +54,9 @@ tests/        # ported regression suites + golden-vector cross-tests
 8. `rulesets.py` exactness enforcement — ports as-is.
 9. One board size per batch; per-batch ruleset round-robin balance.
 10. D4 augment only for non-equivariant specs; equivariant model trains unaugmented.
-11. `d4.py` verbatim (brute-force-derived tables, canonical-frame RoPE, relative-component kernel); register-seed invariant initialization; depth-scaled residual gains 1/√(2·blocks); head shapes incl. `pass_*` register heads.
+11. `d4.py` verbatim (brute-force-derived tables, canonical-frame RoPE, relative-component kernel); rule-conditioned register initialization; depth-scaled residual gains 1/√(2·blocks); head shapes incl. `pass_*` register heads.
 12. Data schema v1 (JSONL/.zst fields) unchanged — existing generated data stays valid.
-13. Optimizer decay/no-decay split incl. `register_seed` exclusion.
+13. Optimizer decay/no-decay split for biases and normalization parameters.
 14. Regression harnesses: 25 model tests (equivariance per layer + full model, stale-cache regression) and ~30 training tests, ported.
 
 ## Phasing (each gate = tests green before next phase)

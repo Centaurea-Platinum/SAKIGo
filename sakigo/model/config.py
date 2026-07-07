@@ -24,6 +24,7 @@ class SakiGoModelConfig:
     stem_channels: tuple[int, ...] = (6, 16, 32)
     rule_mlp_channels: tuple[int, ...] = (10, 32, 64)
     activation: str = "silu"
+    trunk_mlp_variant: str = "plain"
     block_count: int = 5
     register_count: int = 2
     trunk_channels: int = 32

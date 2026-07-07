@@ -9,8 +9,8 @@
   ],
   "head_shapes": {
     "standard_v1": {
-      "spatial_shape": ["expanded_channel", "expanded_channel", 8, "output"],
-      "global_shape": ["register_channel * register_count", "register_channel * register_count / 2", 8, "output"],
+      "spatial_shape": ["expanded_channel", "32", 8, "output"],
+      "global_shape": ["register_channel * register_count", "32", 8, "output"],
       "collapse": "mean_d4_axis",
       "global_heads": {
         "wdl": 4,

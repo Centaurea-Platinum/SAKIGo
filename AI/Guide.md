@@ -45,7 +45,7 @@ Before finalizing after non-trivial work:
 Prefer the repo's native homes:
 
 - Code behavior lives in `Engine/` and `Model/`.
-- Model shape lives in [../Design/ModelSpecs.md](../Design/ModelSpecs.md) and the model code that consumes it.
+- Model shape lives in [../sakigo/model/specs/ModelSpecs.json](../sakigo/model/specs/ModelSpecs.json) and the model code that consumes it.
 - Design intent lives in `Design/`.
 - Durable cross-session memory lives in `AI/`.
 

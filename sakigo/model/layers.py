@@ -6,6 +6,7 @@ from math import sqrt
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from equivariant_attention import (
     InvariantPool,
@@ -53,6 +54,22 @@ class GroupRMSNorm(RegularRMSNorm):
 class GroupPointwiseMLP(RegularPointwiseMLP):
     def __init__(self, channels: tuple[int, ...], group_size: int, final_activation: bool = False) -> None:
         super().__init__(channels, group_size, final_activation=final_activation)
+
+
+class GroupSwiGLU(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, group_size: int) -> None:
+        super().__init__()
+        self.proj = GroupLinear1x1(in_channels, 2 * out_channels, group_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        projected = self.proj(x)
+        if projected.dim() == 5:
+            value, gate = projected.chunk(2, dim=1)
+        elif projected.dim() == 4:
+            value, gate = projected.chunk(2, dim=2)
+        else:
+            raise ValueError("GroupSwiGLU expects [B,C,G,H,W] or [B,R,C,G]")
+        return value * F.silu(gate)
 
 
 class InvariantHead(InvariantPool):
@@ -187,6 +204,7 @@ class TrunkBlock(nn.Module):
         enable_gather: bool = True,
         enable_broadcast: bool = True,
         activation: str = "none",
+        mlp_variant: str = "plain",
     ) -> None:
         super().__init__()
         if q_heads * register_head_dim != register_bottleneck_channels:
@@ -208,8 +226,15 @@ class TrunkBlock(nn.Module):
         self.norm_out = GroupRMSNorm(trunk_channels, eps) if enable_broadcast else None
         self.norm_reg_out = GroupRMSNorm(register_channels, eps) if enable_broadcast else None
 
-        self.f1 = GroupPointwiseMLP((trunk_channels, bottleneck_channels), group_size)
-        self.f1_activation = build_activation(activation)
+        variant = mlp_variant.strip().lower()
+        if variant == "plain":
+            self.f1 = GroupPointwiseMLP((trunk_channels, bottleneck_channels), group_size)
+            self.f1_activation = build_activation(activation)
+        elif variant == "swiglu":
+            self.f1 = GroupSwiGLU(trunk_channels, bottleneck_channels, group_size)
+            self.f1_activation = nn.Identity()
+        else:
+            raise ValueError("mlp_variant must be 'plain' or 'swiglu'")
         self.attn1 = GroupGQAAttention(
             bottleneck_channels,
             board_size,

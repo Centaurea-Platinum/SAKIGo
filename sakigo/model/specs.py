@@ -6,9 +6,8 @@ global heads appended to spatial action heads). This replaces the legacy
 590-line parser; markdown-fence stripping, YAML fallback, `base` shape
 inheritance, and legacy key aliases are intentionally gone.
 
-Package copies of the design specs live next to this module; a test keeps
-them byte-equivalent with Design/ModelSpecs/*.md (design remains the source
-of truth without runtime repo-layout coupling).
+The packaged JSON files next to this module are the source of truth for model
+specs used by training, tests, and checkpoint construction.
 """
 
 from __future__ import annotations
@@ -164,7 +163,7 @@ def config_from_spec(
     board_size: int | None = None,
 ) -> SakiGoModelConfig:
     specs = load_model_specs(path)
-    name = model_name or str(specs.get("default_model", "model1"))
+    name = model_name or str(specs.get("default_model", "plain"))
     models = specs.get("models", {})
     if name not in models:
         available = ", ".join(str(item) for item in models)
@@ -261,6 +260,7 @@ def config_from_spec(
         stem_channels=stem_channels,
         rule_mlp_channels=rule_mlp_channels,
         activation=str(spec.get("activation", "none")),
+        trunk_mlp_variant=str(trunk.get("mlp_variant", "plain")),
         block_count=int(trunk["block_count"]),
         register_count=register_count,
         trunk_channels=expanded_channel,

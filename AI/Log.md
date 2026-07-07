@@ -2,11 +2,19 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-07 - Model spec JSONs became the single source of truth
+
+- Added a trunk `mlp_variant` switch (`plain` / `swiglu`) to the spec loader and model config. The published specs are now named `non-bottleneck`, `plain`, and `swiglu`; `swiglu` replaces the block input mixer with an equivariant value/gate projection.
+- Slimmed the published stem/head shapes: rule MLP is now `10 -> 32 -> register_count*register_channel`, and standard heads are now `input -> 32 -> 8 -> output`. Current parameter counts: `non-bottleneck` ~4.81M, `plain` ~6.12M, `swiglu` ~7.17M.
+- Removed the separate learned `register_seed`; the rule MLP now directly initializes registers, with old checkpoint states allowed to carry and drop the obsolete key during load.
+- Deleted the duplicate `Design/ModelSpecs/*.md` JSON copies. The packaged JSON files in `sakigo/model/specs/` are now the model-spec source of truth, with `ModelSpecs.json` including `StemShapes.json` and `HeadShapes.json` directly.
+- Verification: full pytest suite passed (`44 passed`).
+
 ## 2026-07-07 - Register width decoupled from trunk width
 
 - Created branch `codex-register-width-support` after the repo could not create a slash-nested `codex/...` branch under the local refs/sandbox layout.
 - Added `register_channels`, `register_bottleneck_channels`, and `register_head_dim` to `SakiGoModelConfig`; old checkpoints/specs default to the prior full-width register behavior.
-- Updated `SakiGoNet` and `TrunkBlock` so register seed/rule MLP/global heads use `register_channels`, while gather/broadcast cross-attention uses rectangular projections between board width and register width.
+- Updated `SakiGoNet` and `TrunkBlock` so register initialization/rule MLP/global heads use `register_channels`, while gather/broadcast cross-attention uses rectangular projections between board width and register width.
 - Updated Design + packaged ModelSpecs/StemShapes/HeadShapes: `register_channel` and `register_bottleneck_channel` are first-class spec fields; `model2`/`model3` now use 128-wide trunks, 64-wide registers, and 32-wide register cross-attention. Parameter counts: `model1` 332,238 unchanged; `model2`/`model3` 8,426,602 -> 6,585,578.
 - Tests added/updated for narrow-register specs and rectangular-register equivariance. Verification: targeted specs/model/legacy checkpoint tests passed (`17 passed`); full suite passed (`44 passed in 272.16s`).
 
@@ -188,14 +196,14 @@ Dated, newest first. What changed, what is next. One entry per working session.
 ## 2026-07-03 — Synced AI notes with code-bearing workspace
 
 - Re-read root, model, and engine READMEs; current design docs; Rust engine code; PyTorch model/adapters/specs/tests; and the active diffs. Updated [Context.md](Context.md) from "design-only" to the current repo shape: `Design/`, `Engine/`, `Model/`, and local `Distillation/` assets.
-- Added implemented decisions: the engine owns legality/history/encoding (D20); `Design/ModelSpecs.md` drives `model1` plus scalar controls (D19); and `SakiGoModel` implements register-seeded D4 attention with no FiLM branch (D18).
+- Added implemented decisions: the engine owns legality/history/encoding (D20); `Design/ModelSpecs.md` drives `model1` plus scalar controls (D19); and `SakiGoModel` implements rule-conditioned D4 attention with no FiLM branch (D18).
 - Updated [Issues.md](Issues.md): architecture is now implemented but unvalidated, while search, scoring/adjudication, exact KataGo teacher projection, training/distillation reconciliation, and inference illegal-move masking remain open.
 - Rewrote [Guide.md](Guide.md) to make AI-note maintenance an explicit duty after non-trivial work, not a separate task the human has to request.
 - Worktree maintenance: added ignore coverage for local KataGo downloads/engines/model weights so artifact directories do not masquerade as source.
 
 ## 2026-07-03 — Reconciled model-design clarifications
 
-- Updated AI notes to match the owner's clarifications: board input is six planes; trunk is D4-equivariant spatial attention plus register-token attention; global heads are MLPs on registers; rule conditioning seeds registers by default, with FiLM reserved as an add-on; captured-stone difference is `(opponent stones I captured - my stones opponent captured) / board_area`; pass is one extra logit in the same softmax as the board moves.
+- Updated AI notes to match the owner's clarifications: board input is six planes; trunk is D4-equivariant spatial attention plus register-token attention; global heads are MLPs on registers; rule conditioning initializes registers by default, with FiLM reserved as an add-on; captured-stone difference is `(opponent stones I captured - my stones opponent captured) / board_area`; pass is one extra logit in the same softmax as the board moves.
 - Clarified in Issues that the SquareAccumulation register implementation uses equivariant regular-representation register features, not merely invariant registers; only collapsed global-head outputs are invariant.
 - Left search and training-loop issues as deferred/open rather than trying to settle loss construction or search spec here; the current worktree also updates the matching `Design/` files.
 

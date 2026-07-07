@@ -9,7 +9,7 @@
   "stem_shapes": {
     "regular_v1": {
       "stem_channels": [6, 16, "expanded_channel"],
-      "rule_mlp_channels": [10, 32, "register_channel * register_count", "register_channel * register_count"]
+      "rule_mlp_channels": [10, 32, "register_channel * register_count"]
     }
   }
 }
