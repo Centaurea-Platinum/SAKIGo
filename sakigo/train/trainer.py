@@ -122,6 +122,9 @@ class Trainer:
         self.checkpoint_dir = self.run_dir / "checkpoints"
         self.metrics_path = self.run_dir / "metrics.csv"
         self.compile_status = "off"
+        self.log_interval = (
+            config.checkpoint_interval if config.log_interval <= 0 else config.log_interval
+        )
 
         self.model_config = config_from_spec(config.model_spec)
         self.model = SakiGoNet(self.model_config).to(self.device)
@@ -402,7 +405,7 @@ class Trainer:
             window_samples += batch["board"].shape[0]
             last_step = step
 
-            if step % config.log_interval == 0 or step == config.steps:
+            if step % self.log_interval == 0 or step == config.steps:
                 elapsed = max(time.monotonic() - window_start, 1e-9)
                 row = self._log_row(step, accumulator, writer, window_samples / elapsed)
                 progress.set_postfix(

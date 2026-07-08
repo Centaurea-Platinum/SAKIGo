@@ -208,3 +208,91 @@ def test_val_fixed_replays_identical_batches(workspace: dict[str, Path], spec_pa
     draw_a = [next(iterator) for _ in range(4)]
     draw_b = [next(iterator) for _ in range(4)]
     assert draw_a != draw_b
+
+
+def test_default_log_interval_follows_checkpoint(
+    workspace: dict[str, Path], spec_patch
+) -> None:
+    defaulted = Trainer(
+        _config(
+            workspace,
+            "run_logdefault",
+            log_interval=0,
+            checkpoint_interval=7,
+            steps=1,
+        )
+    )
+    assert defaulted.log_interval == 7
+
+    explicit = Trainer(
+        _config(
+            workspace,
+            "run_logexplicit",
+            log_interval=3,
+            checkpoint_interval=7,
+            steps=1,
+        )
+    )
+    assert explicit.log_interval == 3
+
+
+def test_default_metrics_rows_follow_checkpoint_cadence(
+    workspace: dict[str, Path], spec_patch
+) -> None:
+    trainer = Trainer(
+        _config(
+            workspace,
+            "run_logrows",
+            log_interval=0,
+            checkpoint_interval=5,
+            steps=10,
+            val_batches=1,
+        )
+    )
+    trainer.train()
+
+    metrics_path = Path(trainer.run_dir) / "metrics.csv"
+    lines = metrics_path.read_text(encoding="utf-8").strip().splitlines()
+    header = lines[0].split(",")
+    rows = [dict(zip(header, line.split(","))) for line in lines[1:]]
+    assert [int(row["step"]) for row in rows] == [0, 5, 10]
+
+
+def test_suite_layout_uses_structured_train_dirs(
+    workspace: dict[str, Path], spec_patch
+) -> None:
+    from sakigo.train.suite import SuiteConfig, build_suite_paths, train_config_for_spec
+
+    config = SuiteConfig(
+        root=workspace["root"] / "suite_layout",
+        prepared_dir=workspace["prepared"],
+        specs=("tiny",),
+        batch_size=8,
+        steps=10,
+        checkpoint_interval=5,
+        val_batches=1,
+        model_compile="off",
+        amp="off",
+        device="cpu",
+        progress=False,
+    )
+    paths = build_suite_paths(config)
+    train_config = train_config_for_spec(
+        config,
+        paths,
+        "tiny",
+        data_sources=(),
+        batch_size=8,
+        steps=10,
+    )
+
+    assert paths.data == config.root / "data"
+    assert paths.prepared == workspace["prepared"]
+    assert paths.generation == config.root / "generation"
+    assert paths.train == config.root / "train"
+    assert paths.logs == config.root / "logs"
+    assert paths.sweeps == config.root / "sweeps"
+    assert paths.scripts == config.root / "scripts"
+    assert train_config.run_dir == str(config.root / "train" / "tiny")
+    assert train_config.log_interval == 0
+    assert train_config.checkpoint_interval == 5

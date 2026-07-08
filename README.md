@@ -22,6 +22,7 @@ Common commands:
 ```
 uv run --frozen pytest --basetemp=.pytest-tmp -p no:cacheprovider
 uv run --frozen python -m sakigo.train --data <shards> --model-spec plain --steps 1000
+uv run --frozen python -m sakigo.train.suite --data <shards> --run-dir runs/phase1_suite
 uv run --frozen python -m sakigo.generate --samples 4096 --output data/gen --run-dir runs/gen
 uv run --frozen python -m sakigo.eval --player-a <ckpt> --player-b random --pairs 50
 ```

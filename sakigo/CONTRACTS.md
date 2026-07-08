@@ -87,3 +87,7 @@ runs/<name>/
   checkpoints/step_%06d.pt
   status.json          # heartbeat for orchestration
 ```
+
+For multi-stage suite runs, use `python -m sakigo.train.suite`; keep each
+trainer run under `train/<spec>/` and keep orchestration artifacts out of the
+root: `data/`, `prepared/`, `generation/`, `logs/`, `sweeps/`, and `scripts/`.

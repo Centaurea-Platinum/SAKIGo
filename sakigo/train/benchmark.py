@@ -69,7 +69,7 @@ def benchmark_batch_size(
         loss_weights = LossWeights()
         sampler = RulesetBalancedBatchSampler(dataset, batch_size, seed=0, length=1)
         indices = next(iter(sampler))
-        batch = batch_to_device(collate_prepared([dataset[i] for i in indices]), device)
+        batch = batch_to_device(collate_prepared(dataset.fetch_batch(indices)), device)
         if device.type == "cuda":
             torch.cuda.synchronize()
             torch.cuda.reset_peak_memory_stats()

@@ -43,7 +43,7 @@ class TrainConfig:
     budget_weight: float = 1.0
     # logging / checkpoints
     run_dir: str = ""
-    log_interval: int = 100
+    log_interval: int = 0  # 0 means follow checkpoint_interval
     checkpoint_interval: int = 1000
     val_batches: int = 16
     val_fixed: bool = False  # freeze one val subset instead of rotating through the val set

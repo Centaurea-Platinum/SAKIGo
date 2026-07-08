@@ -8,9 +8,10 @@ counts, without-replacement cycling per (size, ruleset)), `collate_prepared`
 
 from __future__ import annotations
 
+from bisect import bisect_right
 import random
 from pathlib import Path
-from typing import Iterator, Mapping
+from typing import Any, Iterator, Mapping
 
 import numpy as np
 import torch
@@ -98,12 +99,9 @@ class PreparedDataset(Dataset[dict[str, np.ndarray]]):
     def group_of(self, index: int) -> tuple[_Group, int]:
         if not 0 <= index < self._total:
             raise IndexError(index)
-        position = 0
-        for offset, group in zip(self._offsets, self.groups):
-            if index < offset + group.count:
-                return group, index - offset
-            position = offset
-        raise IndexError(index)  # pragma: no cover - unreachable
+        group_index = bisect_right(self._offsets, index) - 1
+        group = self.groups[group_index]
+        return group, index - self._offsets[group_index]
 
     def board_size_of(self, index: int) -> int:
         group, _ = self.group_of(index)
@@ -141,6 +139,35 @@ class PreparedDataset(Dataset[dict[str, np.ndarray]]):
                     ).reshape(-1)
                     sample[key] = vector
         return sample
+
+    def fetch_batch(self, indices: list[int]) -> dict[str, torch.Tensor] | list[dict[str, np.ndarray]]:
+        """Fetch one sampler-emitted batch with fewer Python round trips.
+
+        Our batch sampler already emits one board size per batch, so the common
+        path can gather rows from a single group and return the contract batch
+        directly. Augmentation remains per-sample and falls back to the scalar
+        path so each record gets an independent transform.
+        """
+        if not indices:
+            return []
+        if self.augment_d4:
+            return [self[index] for index in indices]
+
+        first_group, _ = self.group_of(indices[0])
+        rows: list[int] = []
+        for index in indices:
+            group, row = self.group_of(index)
+            if group is not first_group:
+                return [self[item] for item in indices]
+            rows.append(row)
+        arrays = first_group.arrays
+        gathered = {name: np.asarray(arrays[name][rows]) for name in _ARRAY_NAMES}
+        gathered["board_size"] = np.full(len(indices), first_group.board_size, dtype=np.int64)
+        return batch_from_prepared_arrays(gathered)
+
+    def __getitems__(self, indices: list[int]) -> dict[str, torch.Tensor] | list[dict[str, np.ndarray]]:
+        """PyTorch DataLoader batched-fetch hook."""
+        return self.fetch_batch(indices)
 
 
 class RulesetBalancedBatchSampler(Sampler[list[int]]):
@@ -239,38 +266,71 @@ class FixedBatchSampler(Sampler[list[int]]):
         return len(self.batches)
 
 
-def collate_prepared(samples: list[dict[str, np.ndarray]]) -> dict[str, torch.Tensor]:
+def batch_from_prepared_arrays(arrays: Mapping[str, Any]) -> dict[str, torch.Tensor]:
+    """Convert already-batched prepared arrays into the training batch contract."""
+
+    def tensor(name: str, dtype: type | None = None) -> torch.Tensor:
+        array = np.asarray(arrays[name])
+        if dtype is not None:
+            array = array.astype(dtype, copy=False)
+        return torch.from_numpy(array)
+
+    return {
+        "board": tensor("board_planes", np.float32),
+        "rules": tensor("rule_features", np.float32),
+        "ply": tensor("ply"),
+        "wdl_target": tensor("wdl", np.float32),
+        "wdl_mask": tensor("wdl_mask"),
+        "score_target": tensor("score", np.float32).unsqueeze(1),
+        "score_mask": tensor("score_mask"),
+        "ownership_target": tensor("ownership", np.float32),
+        "ownership_mask": tensor("ownership_mask"),
+        "policy_target": tensor("policy", np.float32),
+        "policy_mask": tensor("policy_mask"),
+        "budget_target": tensor("budget", np.float32),
+        "budget_mask": tensor("budget_mask"),
+        "legal_mask": tensor("legal_mask"),
+        "legal_mask_available": tensor("legal_available"),
+    }
+
+
+def collate_prepared(
+    samples: dict[str, torch.Tensor] | list[dict[str, np.ndarray]],
+) -> dict[str, torch.Tensor]:
     """Assemble the contract batch layout from prepared samples."""
+    if isinstance(samples, dict):
+        return samples
     if not samples:
         raise ValueError("cannot collate an empty batch")
     board_size = int(samples[0]["board_size"])
     if any(int(sample["board_size"]) != board_size for sample in samples):
         raise ValueError("batches must contain one board size")
 
-    def stack(name: str, dtype: type | None = None) -> torch.Tensor:
+    def stack(name: str, dtype: type | None = None) -> np.ndarray:
         array = np.stack([sample[name] for sample in samples])
         if dtype is not None:
             array = array.astype(dtype, copy=False)
-        return torch.from_numpy(array)
+        return array
 
-    batch: dict[str, torch.Tensor] = {
-        "board": stack("board_planes", np.float32),
-        "rules": stack("rule_features", np.float32),
-        "ply": stack("ply"),
-        "wdl_target": stack("wdl"),
-        "wdl_mask": stack("wdl_mask"),
-        "score_target": stack("score").unsqueeze(1),
-        "score_mask": stack("score_mask"),
-        "ownership_target": stack("ownership"),
-        "ownership_mask": stack("ownership_mask"),
-        "policy_target": stack("policy"),
-        "policy_mask": stack("policy_mask"),
-        "budget_target": stack("budget"),
-        "budget_mask": stack("budget_mask"),
-        "legal_mask": stack("legal_mask"),
-        "legal_mask_available": stack("legal_available"),
-    }
-    return batch
+    return batch_from_prepared_arrays(
+        {
+            "board_planes": stack("board_planes", np.float32),
+            "rule_features": stack("rule_features", np.float32),
+            "ply": stack("ply"),
+            "wdl": stack("wdl", np.float32),
+            "wdl_mask": stack("wdl_mask"),
+            "score": stack("score", np.float32),
+            "score_mask": stack("score_mask"),
+            "ownership": stack("ownership", np.float32),
+            "ownership_mask": stack("ownership_mask"),
+            "policy": stack("policy", np.float32),
+            "policy_mask": stack("policy_mask"),
+            "budget": stack("budget", np.float32),
+            "budget_mask": stack("budget_mask"),
+            "legal_mask": stack("legal_mask"),
+            "legal_available": stack("legal_available"),
+        }
+    )
 
 
 def make_dataloader(

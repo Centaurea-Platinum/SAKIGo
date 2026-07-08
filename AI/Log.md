@@ -2,6 +2,23 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-08 - Training suite/datapath hardening after stalled run
+
+- Examined the interrupted 486-combination run. Root cause of the visible "metrics every 100" issue was not the `TrainConfig` default: the ad-hoc `train_non-bottleneck` invocation explicitly wrote `log_interval=100`. The run folder also mixed source data, prepared tensors, train outputs, sweeps, logs, and generated scripts at the root.
+- Kept and named the optimized loader path: `PreparedDataset.fetch_batch()` now backs PyTorch `__getitems__`, and `python -m sakigo.train.benchmark` uses it too, so batch-size sweeps measure the same fast memmap gather path as training.
+- Added `python -m sakigo.train.suite`: a source-owned multi-spec runner that prepares data once, optionally benchmarks batch size, trains each spec under `train/<spec>/`, writes `status.json`, and keeps `data/`, `prepared/`, `generation/`, `logs/`, `sweeps/`, and `scripts/` separate.
+- Added regression tests for fast-batch equality, checkpoint-cadence metrics rows (`0, checkpoint, final`), and suite path/config planning.
+- Verification: `python -m sakigo.train.suite --help` resolves cleanly; full Python suite passed (`48 passed`).
+
+## 2026-07-07 - Future-run data/loading cadence hardening during live run
+
+- Live 486-combination Phase 1 run was not interrupted. Generation completed; prep was slow because `prepare_tensor_shards` is currently a single-process, two-pass JSONL(.zst) decoder/writer; training needed `num_workers=0` on Windows after DataLoader worker spawning failed under the launcher.
+- For future train invocations, `PreparedDataset` now implements batched `__getitems__` so the DataLoader can gather a sampler-emitted batch from memmaps in one call and return the contract batch directly, reducing row-by-row Python overhead when `num_workers=0`.
+- Metrics cadence now defaults to checkpoint cadence: `TrainConfig.log_interval=0` means use `checkpoint_interval`; explicit `--log-interval` still overrides. This avoids fixed-validation eval/CSV writes every 100 steps when checkpointing every 1024.
+- Recorded a future-run layout/hardening note in [Issues.md](Issues.md): keep orchestration outputs separated (`data/`, `prepared/`, `generation/`, `train/<spec>/`, `logs/`, `sweeps/`, `scripts/`) and parallelize/one-pass the prep path.
+- Added the suite-run layout note to [CONTRACTS.md](../sakigo/CONTRACTS.md). The active live run folder was not moved while its supervisor was still running.
+- Verification: `tests/test_p2_data.py` and `tests/test_p3_trainer.py` pass with repo-local pytest temp directories.
+
 ## 2026-07-07 - Model spec JSONs became the single source of truth
 
 - Added a trunk `mlp_variant` switch (`plain` / `swiglu`) to the spec loader and model config. The published specs are now named `non-bottleneck`, `plain`, and `swiglu`; `swiglu` replaces the block input mixer with an equivariant value/gate projection.

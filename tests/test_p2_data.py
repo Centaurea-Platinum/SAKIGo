@@ -191,6 +191,20 @@ def test_collate_layout_and_values(prepared: tuple[Path, Path]) -> None:
         assert bool(batch["wdl_mask"][row]) and bool(batch["legal_mask_available"][row])
 
 
+def test_fetch_batch_matches_scalar_collate(prepared: tuple[Path, Path]) -> None:
+    _, out_dir = prepared
+    dataset = PreparedDataset(out_dir, "train")
+    board_size = dataset.board_size_of(0)
+    indices = [index for index in range(len(dataset)) if dataset.board_size_of(index) == board_size][:8]
+
+    fast = dataset.fetch_batch(indices)
+    slow = collate_prepared([dataset[index] for index in indices])
+
+    assert isinstance(fast, dict)
+    for key, value in slow.items():
+        torch.testing.assert_close(fast[key], value)
+
+
 def test_augmentation_matches_legacy(prepared: tuple[Path, Path]) -> None:
     jsonl_path, out_dir = prepared
     dataset = PreparedDataset(out_dir, "train", augment_d4=True)
