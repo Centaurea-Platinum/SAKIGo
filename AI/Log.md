@@ -2,6 +2,14 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-10 - Read-only workspace evaluation recorded
+
+- Audited the current post-cutover workspace across Rust engine/bindings, D4 model and reusable equivariant-attention library, data preparation/sampling, trainer/suite, KataGo generation, evaluation, tests, packaging, and AI/design documentation. Verdict: a strong early research platform with coherent contracts and module boundaries; not yet a complete Go AI because search, self-play training, and full adjudication remain absent.
+- Added verified implementation risks to [Issues.md](Issues.md): `StateHash` is not safe for future NN/TT caching because it omits PSK history and quantizes komi differently from the NN input; native binding/generator tests can silently skip; KataGo startup has a pre-`finally` orphan window; lazy `torch.compile` failures bypass the advertised fallback; resume does not restore sampler state; and eval needs draw-aware, pair-aware regression coverage.
+- Reconciled obsolete current-watchlist claims left by the cutover: PyO3 is active rather than parked, the generator now uses the Rust engine rather than a duplicate Python rules implementation, and training uses prepared mmap shards rather than the deleted streaming trainer. Updated stale links in the affected current issue entries while leaving historical log entries intact.
+- Verification on the Mac review mirror: clean worktree at `9fbe421`; Python source compilation passed for `sakigo/`, `equivariant_attention/`, and `tests/`; all TOML/JSON parsed; a rule-feature perspective smoke passed; `git diff --check` passed. Dynamic Python/Rust suites were not rerun because this clone intentionally lacks the project toolchains; latest recorded project-machine evidence remains 48 Python tests (2026-07-08) and 17 Rust tests (2026-07-06).
+- No production/design files changed; this session only updated durable notes under `AI/`.
+
 ## 2026-07-08 - Training suite/datapath hardening after stalled run
 
 - Examined the interrupted 486-combination run. Root cause of the visible "metrics every 100" issue was not the `TrainConfig` default: the ad-hoc `train_non-bottleneck` invocation explicitly wrote `log_interval=100`. The run folder also mixed source data, prepared tensors, train outputs, sweeps, logs, and generated scripts at the root.
