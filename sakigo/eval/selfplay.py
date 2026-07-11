@@ -44,6 +44,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--sgf", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--allow-unsafe-legacy-checkpoint", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -107,6 +108,12 @@ def _new_game(board_size: int, komi: float) -> Game:
     return Game(board_size, spec.scoring, spec.ko, spec.suicide, komi)
 
 
+def engine_final_score(game: Game, board_size: int, komi: float) -> float:
+    if hasattr(game, "final_score"):
+        return float(game.final_score())
+    return tromp_taylor_score(game.board(), board_size, komi)
+
+
 class RandomPlayer:
     name = "random"
 
@@ -122,10 +129,20 @@ class RandomPlayer:
         return actions
 
 
-def load_policy_model(checkpoint_path: Path, device: torch.device) -> SakiGoNet:
+def load_policy_model(
+    checkpoint_path: Path,
+    device: torch.device,
+    *,
+    allow_unsafe_legacy: bool = False,
+) -> SakiGoNet:
     try:
         payload = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    except Exception:  # legacy checkpoints embed argparse leftovers
+    except Exception as error:
+        if not allow_unsafe_legacy:
+            raise RuntimeError(
+                "checkpoint is not safe-loadable; convert the trusted legacy file or pass "
+                "--allow-unsafe-legacy-checkpoint"
+            ) from error
         payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = config_from_dict(payload["model_config"])
     state = payload.get("model_state", payload.get("model"))
@@ -143,12 +160,22 @@ def load_policy_model(checkpoint_path: Path, device: torch.device) -> SakiGoNet:
 
 
 class PolicyPlayer:
-    def __init__(self, checkpoint_path: Path, device: torch.device, batch_size: int, board_size: int) -> None:
+    def __init__(
+        self,
+        checkpoint_path: Path,
+        device: torch.device,
+        batch_size: int,
+        board_size: int,
+        *,
+        allow_unsafe_legacy: bool = False,
+    ) -> None:
         self.name = str(checkpoint_path)
         self.device = device
         self.batch_size = max(1, batch_size)
         self.board_size = board_size
-        self.model = load_policy_model(checkpoint_path, device)
+        self.model = load_policy_model(
+            checkpoint_path, device, allow_unsafe_legacy=allow_unsafe_legacy
+        )
         self.amp_dtype = torch.bfloat16 if device.type == "cuda" else None
 
     @torch.inference_mode()
@@ -157,12 +184,24 @@ class PolicyPlayer:
         size = self.board_size
         for start in range(0, len(games), self.batch_size):
             chunk = games[start : start + self.batch_size]
-            legal_masks = [match.game.legal_mask() for match in chunk]
+            model_inputs = []
+            for match in chunk:
+                if hasattr(match.game, "model_inputs"):
+                    model_inputs.append(match.game.model_inputs())
+                else:
+                    model_inputs.append(
+                        (
+                            match.game.board_planes(),
+                            match.game.rule_features(),
+                            match.game.legal_mask(),
+                        )
+                    )
+            legal_masks = [inputs[2] for inputs in model_inputs]
             board = torch.tensor(
-                [match.game.board_planes() for match in chunk], dtype=torch.float32
+                [inputs[0] for inputs in model_inputs], dtype=torch.float32
             ).reshape(len(chunk), -1, size, size)
             rules = torch.tensor(
-                [match.game.rule_features() for match in chunk], dtype=torch.float32
+                [inputs[1] for inputs in model_inputs], dtype=torch.float32
             )
             board = board.to(self.device)
             rules = rules.to(self.device)
@@ -183,10 +222,24 @@ class PolicyPlayer:
         return actions
 
 
-def make_player(spec: str, device: torch.device, batch_size: int, seed: int, board_size: int):
+def make_player(
+    spec: str,
+    device: torch.device,
+    batch_size: int,
+    seed: int,
+    board_size: int,
+    *,
+    allow_unsafe_legacy: bool = False,
+):
     if spec.strip().lower() == "random":
         return RandomPlayer(seed)
-    return PolicyPlayer(Path(spec), device, batch_size, board_size)
+    return PolicyPlayer(
+        Path(spec),
+        device,
+        batch_size,
+        board_size,
+        allow_unsafe_legacy=allow_unsafe_legacy,
+    )
 
 
 class MatchGame:
@@ -212,7 +265,10 @@ class MatchGame:
         self.ply = 0
         self.done = False
         self.score = 0.0
+        self.ended_by = ""
         for action in opening:
+            if self.done:
+                break
             self.play(action)
 
     def player_to_move(self) -> int:
@@ -226,10 +282,13 @@ class MatchGame:
         self.ply += 1
         if self.passes >= 2 or self.ply >= self.max_plies:
             self.done = True
-            self.score = tromp_taylor_score(self.game.board(), self.board_size, self.komi)
+            self.ended_by = "passes" if self.passes >= 2 else "max_plies"
+            self.score = engine_final_score(self.game, self.board_size, self.komi)
 
-    def winner(self) -> int:
-        """0 = player A, 1 = player B (fractional komi makes ties impossible)."""
+    def winner(self) -> int | None:
+        """0 = player A, 1 = player B; None is a draw or unadjudicated cap."""
+        if self.ended_by == "max_plies" or self.score == 0.0:
+            return None
         black_won = self.score > 0
         return self.black_player if black_won else 1 - self.black_player
 
@@ -270,7 +329,7 @@ def write_sgf(path: Path, match_game: MatchGame, player_names: tuple[str, str], 
     path.write_text(content, encoding="utf-8")
 
 
-def wilson_interval(wins: int, total: int, z: float = 1.96) -> tuple[float, float]:
+def wilson_interval(wins: float, total: int, z: float = 1.96) -> tuple[float, float]:
     if total == 0:
         return 0.0, 1.0
     p = wins / total
@@ -278,6 +337,17 @@ def wilson_interval(wins: int, total: int, z: float = 1.96) -> tuple[float, floa
     center = (p + z * z / (2 * total)) / denominator
     margin = z * math.sqrt(p * (1.0 - p) / total + z * z / (4 * total * total)) / denominator
     return max(0.0, center - margin), min(1.0, center + margin)
+
+
+def paired_mean_interval(values: list[float], z: float = 1.96) -> tuple[float, float]:
+    if not values:
+        return 0.0, 1.0
+    mean = sum(values) / len(values)
+    if len(values) == 1:
+        return mean, mean
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    margin = z * math.sqrt(variance / len(values))
+    return max(0.0, mean - margin), min(1.0, mean + margin)
 
 
 def elo_from_p(p: float) -> float:
@@ -289,13 +359,35 @@ def main(argv: list[str] | None = None) -> None:
     if not ENGINE_AVAILABLE:
         raise RuntimeError("sakigo_engine wheel is not installed; see sakigo/engine/__init__.py")
     args = parse_args(argv)
+    if args.pairs <= 0 or args.board_size <= 0 or args.batch_size <= 0:
+        raise ValueError("pairs, board-size, and batch-size must be positive")
+    if not math.isfinite(args.komi):
+        raise ValueError("komi must be finite")
+    if not math.isfinite(args.temperature) or args.temperature < 0.0:
+        raise ValueError("temperature must be finite and non-negative")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else torch.device(args.device)
     board_size = args.board_size
     max_plies = args.max_plies or 2 * board_size * board_size
+    if max_plies <= 0:
+        raise ValueError("max-plies must be positive")
     rng = random.Random(args.seed)
     torch.manual_seed(args.seed)
-    player_a = make_player(args.player_a, device, args.batch_size, args.seed + 101, board_size)
-    player_b = make_player(args.player_b, device, args.batch_size, args.seed + 202, board_size)
+    player_a = make_player(
+        args.player_a,
+        device,
+        args.batch_size,
+        args.seed + 101,
+        board_size,
+        allow_unsafe_legacy=args.allow_unsafe_legacy_checkpoint,
+    )
+    player_b = make_player(
+        args.player_b,
+        device,
+        args.batch_size,
+        args.seed + 202,
+        board_size,
+        allow_unsafe_legacy=args.allow_unsafe_legacy_checkpoint,
+    )
     players = (player_a, player_b)
     player_names = (f"A:{Path(player_a.name).stem}", f"B:{Path(player_b.name).stem}")
 
@@ -331,13 +423,26 @@ def main(argv: list[str] | None = None) -> None:
     if args.sgf:
         sgf_dir.mkdir(parents=True, exist_ok=True)
     wins = [0, 0]
-    pair_outcomes = {"2-0": 0, "1-1": 0, "0-2": 0}
+    draws = 0
+    voids = 0
+    pair_outcomes: dict[str, int] = {}
     with (run_dir / "games.jsonl").open("w", encoding="utf-8") as handle:
         for game in games:
             winner = game.winner()
-            wins[winner] += 1
-            margin = abs(game.score)
-            result = ("B+" if game.score > 0 else "W+") + f"{margin:g}"
+            if winner is None:
+                if game.ended_by == "max_plies":
+                    voids += 1
+                    result = "Void"
+                    winner_label = "void"
+                else:
+                    draws += 1
+                    result = "0"
+                    winner_label = "draw"
+            else:
+                wins[winner] += 1
+                margin = abs(game.score)
+                result = ("B+" if game.score > 0 else "W+") + f"{margin:g}"
+                winner_label = "A" if winner == 0 else "B"
             if args.sgf:
                 write_sgf(sgf_dir / f"game_{game.game_index:04d}.sgf", game, player_names, result)
             handle.write(
@@ -345,7 +450,7 @@ def main(argv: list[str] | None = None) -> None:
                     {
                         "game_index": game.game_index,
                         "black_player": "A" if game.black_player == 0 else "B",
-                        "winner": "A" if winner == 0 else "B",
+                        "winner": winner_label,
                         "result": result,
                         "score_black_minus_white": game.score,
                         "plies": game.ply,
@@ -354,12 +459,25 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 + "\n"
             )
+    pair_scores: list[float] = []
     for pair in range(args.pairs):
-        a_wins = sum(1 for game in games[2 * pair : 2 * pair + 2] if game.winner() == 0)
-        pair_outcomes[("0-2", "1-1", "2-0")[a_wins]] += 1
+        pair_games = games[2 * pair : 2 * pair + 2]
+        if any(game.ended_by == "max_plies" for game in pair_games):
+            pair_outcomes["void"] = pair_outcomes.get("void", 0) + 1
+            continue
+        a_points = sum(
+            1.0 if game.winner() == 0 else 0.5 if game.winner() is None else 0.0
+            for game in pair_games
+        )
+        key = f"{a_points:g}-{2.0 - a_points:g}"
+        pair_outcomes[key] = pair_outcomes.get(key, 0) + 1
+        pair_scores.append(a_points / 2.0)
 
-    p = wins[0] / total if total else 0.0
-    low, high = wilson_interval(wins[0], total)
+    scored_games = total - voids
+    a_points = wins[0] + 0.5 * draws
+    p = a_points / scored_games if scored_games else 0.0
+    low, high = wilson_interval(a_points, scored_games)
+    pair_low, pair_high = paired_mean_interval(pair_scores)
     summary = {
         "player_a": player_a.name,
         "player_b": player_b.name,
@@ -367,11 +485,14 @@ def main(argv: list[str] | None = None) -> None:
         "games": total,
         "wins_a": wins[0],
         "wins_b": wins[1],
+        "draws": draws,
+        "void_games": voids,
         "winrate_a": p,
         "winrate_a_ci95": [low, high],
         "elo_a_minus_b": elo_from_p(p),
         "elo_ci95": [elo_from_p(low), elo_from_p(high)],
         "pair_outcomes_a": pair_outcomes,
+        "paired_score_a_ci95": [pair_low, pair_high],
         "opening_plies": args.opening_plies,
         "temperature": args.temperature,
         "board_size": board_size,
@@ -382,9 +503,10 @@ def main(argv: list[str] | None = None) -> None:
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(
-        f"A wins {wins[0]}/{total} (p={p:.3f}, 95% CI {low:.3f}-{high:.3f})  "
+        f"A wins {wins[0]}, B wins {wins[1]}, draws {draws}, void {voids} "
+        f"(score={p:.3f}, paired 95% CI {pair_low:.3f}-{pair_high:.3f})  "
         f"Elo {elo_from_p(p):+.0f} (CI {elo_from_p(low):+.0f}..{elo_from_p(high):+.0f})  "
-        f"pairs 2-0/1-1/0-2: {pair_outcomes['2-0']}/{pair_outcomes['1-1']}/{pair_outcomes['0-2']}"
+        f"pairs {pair_outcomes}"
     )
     print(f"run_dir={run_dir}")
 

@@ -73,9 +73,11 @@ move, and advances the move number.
 
 ### Hashing
 
-`hash_board` uses a deterministic 64-bit FNV-style hash over the board size and
-every cell state: empty, black, or white. This is intended for fast repetition
-tracking inside the engine, not for cryptographic identity.
+`hash_board` uses a deterministic incremental 128-bit Zobrist hash over board
+size, point, and stone color. `PositionHash` is board-only for positional
+superko. `StateHash` additionally includes side to move, simple ko, captures,
+rules, the exact float32 komi bits, and an order-independent digest of the
+superko history set, so it is suitable for the encoded-input cache boundary.
 
 ### Encoding
 
@@ -121,10 +123,12 @@ Implemented:
 - pass moves.
 - capture accounting.
 - board and rule feature encoding.
+- combined model inputs plus legal mask from one legality scan.
+- Tromp-Taylor/Chinese area scoring.
 
 Not implemented here yet:
 
-- final scoring.
+- non-area final scoring (Ancient Chinese group tax and territory variants).
 - end-of-game adjudication.
 - search.
 - neural network inference.

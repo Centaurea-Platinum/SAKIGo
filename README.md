@@ -26,3 +26,7 @@ uv run --frozen python -m sakigo.train.suite --data <shards> --run-dir runs/phas
 uv run --frozen python -m sakigo.generate --samples 4096 --output data/gen --run-dir runs/gen
 uv run --frozen python -m sakigo.eval --player-a <ckpt> --player-b random --pairs 50
 ```
+
+CI additionally builds and installs the PyO3 wheel before running the native
+binding and generator gates, so a missing engine cannot turn those tests into
+silent skips.

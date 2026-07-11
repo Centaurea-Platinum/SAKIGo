@@ -2,6 +2,16 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-11 - Architecture hardening fixes implemented
+
+- Hardened generation startup, shutdown, and output publication: native-engine availability and numeric configuration are validated before work starts; KataGo analysis is pinned to Black's perspective; startup failures reap child processes; response waits time out; failed runs record their error; and shards are written privately then atomically published. Existing generation output now requires an explicit overwrite flag.
+- Tightened the data boundary around schema-v1 records: rulesets are required, komi must be finite, legal masks must be JSON booleans with legal pass, policy targets must be one-hot and legal, and illegal budget mass is rejected. Dataset splits now hash the canonical model-visible position, while prepared datasets use immutable generation directories and atomically switch their manifest only after every array is flushed.
+- Made training continuation exact for the supported single-worker path by checkpointing sampler and augmentation RNG state, versioning checkpoints at schema 3, validating configuration centrally, saving scheduler state consistently, and falling back cleanly if lazy compilation fails. Training failures now close resources and leave a failed status with the originating error.
+- Corrected evaluation semantics: checkpoint loading is safe by default, unsafe legacy fallback is explicit, draws receive half a point, capped games are void rather than White wins, confidence intervals use color-reversed game pairs, and matrix evaluation rejects unsupported non-area scoring. Added a directly trainable `scalar-control` model spec.
+- Extended the Rust engine with history-sensitive state hashes, exact float32 komi hashing, combined model-input extraction in one legality scan, finite-komi validation, and canonical area scoring exposed to Python. Added a CI workflow that builds and installs the native wheel before running binding and Python tests, preventing native coverage from silently disappearing.
+- Verification on the project machine: `68 passed, 1 skipped` in Python (the skip is the intentionally absent legacy-checkpoint fixture); `19 passed` in Rust; Rust formatting and strict Clippy checks passed; Python source compilation passed; and the rebuilt native wheel was used by the full suite.
+- Remaining scope is intentional rather than a regression: full neural search/self-play training, true mid-run generation resume, and non-area/dead-stone adjudication are still future phases.
+
 ## 2026-07-10 - Read-only workspace evaluation recorded
 
 - Audited the current post-cutover workspace across Rust engine/bindings, D4 model and reusable equivariant-attention library, data preparation/sampling, trainer/suite, KataGo generation, evaluation, tests, packaging, and AI/design documentation. Verdict: a strong early research platform with coherent contracts and module boundaries; not yet a complete Go AI because search, self-play training, and full adjudication remain absent.

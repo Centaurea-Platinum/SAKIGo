@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import time
 from collections import Counter, defaultdict
@@ -21,7 +22,7 @@ from sakigo.eval.selfplay import (
     PolicyPlayer,
     SGF_LETTERS,
     elo_from_p,
-    tromp_taylor_score,
+    engine_final_score,
     wilson_interval,
 )
 from sakigo.rulesets import RulesetSpec, ruleset_from_name
@@ -46,6 +47,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--sgf", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--allow-unsafe-legacy-checkpoint", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -134,6 +136,8 @@ class MatrixGame:
         self.score = 0.0
         self.ended_by = ""
         for action in opening:
+            if self.done:
+                break
             self.play(action)
 
     def label_to_move(self) -> str:
@@ -152,19 +156,26 @@ class MatrixGame:
             self.done = True
             self.ended_by = "max_plies"
         if self.done:
-            if self.ruleset.scoring not in {"area", "area_ancient_chinese"}:
+            if self.ruleset.scoring != "area":
                 raise ValueError(
-                    f"matrix scoring supports area-like rules, got {self.ruleset.scoring!r}"
+                    f"matrix scoring supports Tromp-Taylor area scoring only, got {self.ruleset.scoring!r}"
                 )
-            self.score = tromp_taylor_score(self.game.board(), self.board_size, self.komi)
+            self.score = engine_final_score(self.game, self.board_size, self.komi)
 
-    def winner(self) -> str:
+    def winner(self) -> str | None:
+        if self.ended_by == "max_plies" or self.score == 0.0:
+            return None
         return self.black_label if self.score > 0 else self.white_label
 
 
 def _write_sgf(path: Path, game: MatrixGame, player_names: dict[str, str]) -> None:
     area = game.board_size * game.board_size
-    result = ("B+" if game.score > 0 else "W+") + f"{abs(game.score):g}"
+    if game.ended_by == "max_plies":
+        result = "Void"
+    elif game.score == 0.0:
+        result = "0"
+    else:
+        result = ("B+" if game.score > 0 else "W+") + f"{abs(game.score):g}"
     nodes: list[str] = []
     color = "B"
     for action in game.actions:
@@ -196,16 +207,23 @@ def _summary(
         first, second = pairing
         wins = Counter(game.winner() for game in group)
         first_wins = wins[first]
-        low, high = wilson_interval(first_wins, len(group))
+        draws = sum(1 for game in group if game.ended_by != "max_plies" and game.score == 0.0)
+        voids = sum(1 for game in group if game.ended_by == "max_plies")
+        scored = len(group) - voids
+        first_points = first_wins + 0.5 * draws
+        low, high = wilson_interval(first_points, scored)
         by_pairing[pairing] = {
             "games": len(group),
             "first": first,
             "second": second,
             "wins_first": first_wins,
             "wins_second": wins[second],
-            "winrate_first": first_wins / len(group) if group else 0.0,
+            "draws": draws,
+            "void_games": voids,
+            "score_first": first_points / scored if scored else 0.0,
+            "winrate_first": first_points / scored if scored else 0.0,
             "winrate_first_ci95": [low, high],
-            "elo_first_minus_second": elo_from_p(first_wins / len(group)) if group else 0.0,
+            "elo_first_minus_second": elo_from_p(first_points / scored) if scored else 0.0,
             "elo_ci95": [elo_from_p(low), elo_from_p(high)],
             "avg_plies": sum(game.ply for game in group) / len(group) if group else 0.0,
             "max_plies_seen": max((game.ply for game in group), default=0),
@@ -220,14 +238,21 @@ def _summary(
         first, second = key
         wins = Counter(game.winner() for game in group)
         first_wins = wins[first]
-        low, high = wilson_interval(first_wins, len(group))
+        draws = sum(1 for game in group if game.ended_by != "max_plies" and game.score == 0.0)
+        voids = sum(1 for game in group if game.ended_by == "max_plies")
+        scored = len(group) - voids
+        first_points = first_wins + 0.5 * draws
+        low, high = wilson_interval(first_points, scored)
         unordered[key] = {
             "games": len(group),
             "labels": [first, second],
             "wins": {first: wins[first], second: wins[second]},
-            "winrate_first_label": first_wins / len(group) if group else 0.0,
+            "draws": draws,
+            "void_games": voids,
+            "score_first_label": first_points / scored if scored else 0.0,
+            "winrate_first_label": first_points / scored if scored else 0.0,
             "winrate_first_label_ci95": [low, high],
-            "elo_first_label_minus_second": elo_from_p(first_wins / len(group)) if group else 0.0,
+            "elo_first_label_minus_second": elo_from_p(first_points / scored) if scored else 0.0,
             "elo_ci95": [elo_from_p(low), elo_from_p(high)],
         }
 
@@ -257,6 +282,12 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     if args.games_per_pairing <= 0:
         raise ValueError("games-per-pairing must be positive")
+    if args.board_size <= 0 or args.batch_size <= 0:
+        raise ValueError("board-size and batch-size must be positive")
+    if not math.isfinite(args.komi):
+        raise ValueError("komi must be finite")
+    if not math.isfinite(args.temperature) or args.temperature < 0.0:
+        raise ValueError("temperature must be finite and non-negative")
 
     checkpoint_paths = _parse_players(args.player)
     pairings = _parse_pairings(args.pairings, checkpoint_paths)
@@ -268,8 +299,10 @@ def main(argv: list[str] | None = None) -> None:
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
     ruleset = ruleset_from_name(args.ruleset).with_komi(args.komi)
-    if ruleset.scoring not in {"area", "area_ancient_chinese"}:
-        raise ValueError(f"matrix scoring supports area-like rules, got {ruleset.scoring!r}")
+    if ruleset.scoring != "area":
+        raise ValueError(
+            f"matrix scoring supports Tromp-Taylor area scoring only, got {ruleset.scoring!r}"
+        )
     max_plies = None if args.max_plies <= 0 else args.max_plies
     run_dir = Path(args.run_dir) if args.run_dir else Path("runs") / f"matrix_{datetime.now():%Y%m%d_%H%M%S}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -278,7 +311,13 @@ def main(argv: list[str] | None = None) -> None:
         sgf_dir.mkdir(parents=True, exist_ok=True)
 
     players = {
-        label: PolicyPlayer(path, device, args.batch_size, args.board_size)
+        label: PolicyPlayer(
+            path,
+            device,
+            args.batch_size,
+            args.board_size,
+            allow_unsafe_legacy=args.allow_unsafe_legacy_checkpoint,
+        )
         for label, path in sorted(checkpoint_paths.items())
     }
     player_names = {label: path.parent.parent.name for label, path in checkpoint_paths.items()}
@@ -360,7 +399,15 @@ def main(argv: list[str] | None = None) -> None:
 
     with (run_dir / "games.jsonl").open("w", encoding="utf-8") as handle:
         for game in games:
-            result = ("B+" if game.score > 0 else "W+") + f"{abs(game.score):g}"
+            if game.ended_by == "max_plies":
+                result = "Void"
+                winner = "void"
+            elif game.score == 0.0:
+                result = "0"
+                winner = "draw"
+            else:
+                result = ("B+" if game.score > 0 else "W+") + f"{abs(game.score):g}"
+                winner = game.winner()
             if args.sgf:
                 _write_sgf(sgf_dir / f"{game.game_index:04d}_{game.pairing}.sgf", game, player_names)
             handle.write(
@@ -370,7 +417,7 @@ def main(argv: list[str] | None = None) -> None:
                         "pairing": game.pairing,
                         "black": game.black_label,
                         "white": game.white_label,
-                        "winner": game.winner(),
+                        "winner": winner,
                         "result": result,
                         "score_black_minus_white": game.score,
                         "plies": game.ply,

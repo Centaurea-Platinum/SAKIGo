@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 
 use crate::board::{Board, BoardError, Color, Point};
-use crate::hash::{hash_board, hash_state, PositionHash, StateHash};
+use crate::hash::{add_to_history_digest, hash_board, hash_state, PositionHash, StateHash};
 use crate::rules::{KoRule, Ruleset, SuicideRule};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +75,7 @@ pub struct GameState {
     simple_ko: Option<Point>,
     position_hash: PositionHash,
     seen_positions: HashSet<PositionHash>,
+    history_digest: u128,
     position_history: Vec<PositionHash>,
     move_number: usize,
 }
@@ -95,6 +96,7 @@ impl GameState {
             simple_ko: None,
             position_hash: initial_hash,
             seen_positions: HashSet::from([initial_hash]),
+            history_digest: add_to_history_digest(0, initial_hash),
             position_history: vec![initial_hash],
             move_number: 0,
         }
@@ -132,15 +134,16 @@ impl GameState {
         self.position_hash
     }
 
-    /// Metadata-aware key for transposition tables and NN caches: position
-    /// plus side to move, simple-ko point, captures, and rules. Never used
-    /// for superko checks (those are rule-defined; see `PositionHash`).
+    /// Metadata-aware key for transposition tables and NN caches: position,
+    /// side to move, simple-ko point, captures, history digest, and rules.
+    /// Never used for superko checks (those use the exact `seen_positions` set).
     pub fn state_hash(&self) -> StateHash {
         hash_state(
             self.position_hash,
             self.to_move,
             self.simple_ko,
             self.captures,
+            self.history_digest,
             &self.rules,
         )
     }
@@ -175,7 +178,9 @@ impl GameState {
         let color = self.to_move;
         let position_hash = self.position_hash;
         self.simple_ko = None;
-        self.seen_positions.insert(position_hash);
+        if self.seen_positions.insert(position_hash) {
+            self.history_digest = add_to_history_digest(self.history_digest, position_hash);
+        }
         self.position_history.push(position_hash);
         self.to_move = self.to_move.opponent();
         self.move_number += 1;
@@ -199,7 +204,10 @@ impl GameState {
         self.captures[color.opponent().index()] += analysis.captured_self;
         self.simple_ko = analysis.next_simple_ko;
         self.position_hash = analysis.position_hash;
-        self.seen_positions.insert(analysis.position_hash);
+        if self.seen_positions.insert(analysis.position_hash) {
+            self.history_digest =
+                add_to_history_digest(self.history_digest, analysis.position_hash);
+        }
         self.position_history.push(analysis.position_hash);
         self.to_move = color.opponent();
         self.move_number += 1;

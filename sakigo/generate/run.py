@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import queue
 import random
 import sys
 import time
@@ -18,6 +20,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from sakigo.data.records import is_zstd_jsonl_path
+from sakigo.engine import ENGINE_AVAILABLE
 from sakigo.generate.game import GeneratorGame
 from sakigo.generate.katago import (
     KataGoAnalysisClient,
@@ -57,6 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--samples-per-file", type=int, default=DEFAULT_SAMPLES_PER_FILE)
     parser.add_argument("--zstd-level", type=int, default=DEFAULT_ZSTD_LEVEL)
+    parser.add_argument("--overwrite-output", action="store_true")
     parser.add_argument("--status", type=Path, default=None)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--katago", type=Path, default=None)
@@ -69,6 +73,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-plies", type=int, default=240)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--log-interval", type=int, default=1024)
+    parser.add_argument("--response-timeout", type=float, default=300.0)
     parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--board-sizes", default=DEFAULT_BOARD_SIZES)
     parser.add_argument("--rulesets", default=None, help=f"Default: {DEFAULT_RULESETS}.")
@@ -98,10 +103,26 @@ def _write_status(path: Path | None, payload: dict) -> None:
 
 def run(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    if not ENGINE_AVAILABLE:
+        raise RuntimeError("sakigo_engine wheel is not installed; see sakigo/engine/__init__.py")
     if args.komi is not None and args.komis is not None and args.komis.strip():
         raise ValueError("use either --komi or --komis, not both")
     if args.concurrency <= 0:
         raise ValueError("--concurrency must be positive")
+    if args.log_interval <= 0:
+        raise ValueError("--log-interval must be positive")
+    if args.max_plies <= 0:
+        raise ValueError("--max-plies must be positive")
+    if args.analysis_threads <= 0 or args.nn_batch_size <= 0:
+        raise ValueError("--analysis-threads and --nn-batch-size must be positive")
+    if not math.isfinite(args.response_timeout) or args.response_timeout <= 0.0:
+        raise ValueError("--response-timeout must be positive")
+    if not math.isfinite(args.temperature) or args.temperature < 0.0:
+        raise ValueError("--temperature must be finite and non-negative")
+    if args.samples_per_file < 0:
+        raise ValueError("--samples-per-file must be non-negative")
+    if not 1 <= args.zstd_level <= 22:
+        raise ValueError("--zstd-level must be in [1, 22]")
     board_sizes = parse_board_sizes(args.board_sizes)
     ruleset_names = parse_ruleset_names(args.rulesets or DEFAULT_RULESETS)
     has_override = any(
@@ -145,16 +166,6 @@ def run(argv: list[str] | None = None) -> None:
     args.run_dir.mkdir(parents=True, exist_ok=True)
     status_path = args.status or (args.run_dir / "status.json")
 
-    katago_path = args.katago or default_katago_path()
-    client = KataGoAnalysisClient(
-        katago=katago_path,
-        model=args.model or default_model_path(),
-        config=args.config or default_config_path(katago_path),
-        analysis_threads=args.analysis_threads,
-        nn_batch_size=args.nn_batch_size,
-        run_dir=args.run_dir,
-    )
-
     rng = random.Random(args.seed)
     schedule = GenerationSchedule(plan, rng)
 
@@ -174,15 +185,30 @@ def run(argv: list[str] | None = None) -> None:
     if not games:
         raise RuntimeError("generation plan has no schedulable combinations")
 
+    katago_path = args.katago or default_katago_path()
+    try:
+        client = KataGoAnalysisClient(
+            katago=katago_path,
+            model=args.model or default_model_path(),
+            config=args.config or default_config_path(katago_path),
+            analysis_threads=args.analysis_threads,
+            nn_batch_size=args.nn_batch_size,
+            run_dir=args.run_dir,
+        )
+    except Exception as error:
+        _write_status(
+            status_path,
+            {"state": "failed", "error": str(error), "updated_at": _now_iso()},
+        )
+        raise
+
     pending: dict[str, GeneratorGame] = {}
     next_query = 0
     next_game_id = args.concurrency
     completed_games = 0
     started_at = time.time()
     show_progress = args.progress if args.progress is not None else sys.stdout.isatty()
-    progress = tqdm(
-        total=plan.target_samples, disable=not show_progress, unit="rec", dynamic_ncols=True
-    )
+    progress = None
 
     def variant_for_game(game: GeneratorGame) -> GenerationVariant:
         return GenerationVariant(board_size=game.board_size, ruleset=game.ruleset)
@@ -212,18 +238,31 @@ def run(argv: list[str] | None = None) -> None:
         if reset_game(game):
             send(game)
 
-    for game in games:
-        send_or_reschedule(game)
-    client.flush()
-
     try:
+        progress = tqdm(
+            total=plan.target_samples,
+            disable=not show_progress,
+            unit="rec",
+            dynamic_ncols=True,
+        )
+        for game in games:
+            send_or_reschedule(game)
+        client.flush()
         with GenerationOutputWriter(
-            args.output, samples_per_file=args.samples_per_file, zstd_level=args.zstd_level
+            args.output,
+            samples_per_file=args.samples_per_file,
+            zstd_level=args.zstd_level,
+            overwrite=args.overwrite_output,
         ) as output:
             while schedule.total_written < plan.target_samples:
                 if not pending:
                     raise RuntimeError("generation schedule exhausted before reaching target samples")
-                response = client.responses.get()
+                try:
+                    response = client.responses.get(timeout=args.response_timeout)
+                except queue.Empty as error:
+                    raise TimeoutError(
+                        f"KataGo produced no response for {args.response_timeout:g} seconds"
+                    ) from error
                 if response.get("_engine_exited"):
                     tail = " | ".join(response.get("stderr_tail") or [])
                     raise RuntimeError(
@@ -291,8 +330,21 @@ def run(argv: list[str] | None = None) -> None:
                         },
                     )
                 client.flush()
+    except Exception as error:
+        _write_status(
+            status_path,
+            {
+                "state": "failed",
+                "error": str(error),
+                "samples": schedule.total_written,
+                "target_samples": plan.target_samples,
+                "updated_at": _now_iso(),
+            },
+        )
+        raise
     finally:
-        progress.close()
+        if progress is not None:
+            progress.close()
         client.shutdown()
 
 

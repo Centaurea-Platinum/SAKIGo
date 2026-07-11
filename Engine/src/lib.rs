@@ -5,6 +5,7 @@ pub mod hash;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod rules;
+pub mod scoring;
 
 pub use board::{Board, BoardError, Color, Group, Point, MAX_BOARD_SIZE, MIN_BOARD_SIZE};
 pub use encoder::{
@@ -14,3 +15,4 @@ pub use encoder::{
 pub use game::{GameState, GoMove, IllegalMove, MoveOutcome};
 pub use hash::{hash_board, hash_state, PositionHash, StateHash};
 pub use rules::{KoRule, Ruleset, ScoringRule, SuicideRule};
+pub use scoring::{final_area_score, ScoringError};

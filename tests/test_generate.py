@@ -144,6 +144,35 @@ def test_output_writer_shards(tmp_path: Path) -> None:
             seen.extend(json.loads(line)["index"] for line in handle if line.strip())
     assert seen == list(range(8))
 
+    with pytest.raises(FileExistsError, match="overwrite-output"):
+        GenerationOutputWriter(output, samples_per_file=3, zstd_level=3)
+    with GenerationOutputWriter(
+        output, samples_per_file=3, zstd_level=3, overwrite=True
+    ) as writer:
+        writer.write_record({"index": 9})
+    assert [path.name for path in output.glob("*.jsonl.zst")] == [
+        "samples_000000.jsonl.zst"
+    ]
+
+
+def test_katago_override_forces_black_perspective(tmp_path: Path) -> None:
+    from sakigo.generate.katago import analysis_override
+
+    override = analysis_override(
+        analysis_threads=2, nn_batch_size=4, analysis_log_dir=tmp_path
+    )
+    assert "reportAnalysisWinratesAs=BLACK" in override
+
+
+def test_output_writer_does_not_publish_partial_shard(tmp_path: Path) -> None:
+    output = tmp_path / "partial"
+    with pytest.raises(RuntimeError, match="stop"):
+        with GenerationOutputWriter(output, samples_per_file=3, zstd_level=3) as writer:
+            writer.write_record({"index": 0})
+            raise RuntimeError("stop")
+    assert not list(output.glob("samples_*.jsonl.zst"))
+    assert list(output.glob(".samples_*.tmp.jsonl.zst"))
+
 
 def test_katago_client_signals_engine_exit() -> None:
     """If KataGo dies, the reader must enqueue a sentinel so run() fails loudly

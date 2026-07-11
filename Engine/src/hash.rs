@@ -91,8 +91,9 @@ pub fn hash_board(board: &Board) -> PositionHash {
     PositionHash(hash)
 }
 
-/// 128-bit hash of the full game state: board position plus side to move,
-/// simple-ko point, capture counts, and ruleset (including komi).
+/// 128-bit hash of the neural-input-relevant game state: board position plus
+/// side to move, simple-ko point, capture counts, superko-history digest, and
+/// ruleset (including exact float32 komi bits).
 ///
 /// This is the transposition-table / NN-cache key (KataGo's
 /// `getSituationRulesAndKoHash` analogue). It is NOT a repetition-rule hash:
@@ -133,17 +134,18 @@ pub fn hash_state(
     to_move: Color,
     simple_ko: Option<Point>,
     captures: [usize; 2],
+    history_digest: u128,
     rules: &Ruleset,
 ) -> StateHash {
     let mut hash = position.0;
+    hash ^= history_digest;
     hash ^= player_key(to_move);
     if let Some(point) = simple_ko {
         hash ^= KO_POINT_TABLE[point.row * MAX_BOARD_SIZE + point.col];
     }
     hash ^= mix_metadata(0xCA97, captures[0] as u64);
     hash ^= mix_metadata(0xCA98, captures[1] as u64);
-    // Komi discretized to quarter points (KataGo discretizes similarly).
-    hash ^= mix_metadata(0x4B0A, (rules.komi * 4.0).round() as i64 as u64);
+    hash ^= mix_metadata(0x4B0A, rules.komi.to_bits() as u64);
     hash ^= mix_metadata(
         0x521E,
         match rules.scoring {
@@ -168,6 +170,15 @@ pub fn hash_state(
         },
     );
     StateHash(hash)
+}
+
+/// Order-independent digest of the positional-superko history set. XOR is
+/// appropriate because `seen_positions` is a set and repeated passes do not
+/// add a new history element.
+pub fn add_to_history_digest(digest: u128, position: PositionHash) -> u128 {
+    let low = position.0 as u64;
+    let high = (position.0 >> 64) as u64;
+    digest ^ mix_metadata(0x4853_5431, low) ^ mix_metadata(0x4853_5432, high)
 }
 
 /// Domain-separated SplitMix mixing for scalar metadata: equal values in
@@ -224,35 +235,63 @@ mod tests {
         let position = hash_board(&board);
         let rules = Ruleset::default();
 
-        let base = hash_state(position, Color::Black, None, [0, 0], &rules);
+        let history = add_to_history_digest(0, position);
+        let base = hash_state(position, Color::Black, None, [0, 0], history, &rules);
         // Side to move.
         assert_ne!(
             base,
-            hash_state(position, Color::White, None, [0, 0], &rules)
+            hash_state(position, Color::White, None, [0, 0], history, &rules)
         );
         // Capture counts, per color.
         assert_ne!(
             base,
-            hash_state(position, Color::Black, None, [1, 0], &rules)
+            hash_state(position, Color::Black, None, [1, 0], history, &rules)
         );
         assert_ne!(
-            hash_state(position, Color::Black, None, [1, 0], &rules),
-            hash_state(position, Color::Black, None, [0, 1], &rules)
+            hash_state(position, Color::Black, None, [1, 0], history, &rules),
+            hash_state(position, Color::Black, None, [0, 1], history, &rules)
         );
         // Simple-ko point.
         assert_ne!(
             base,
-            hash_state(position, Color::Black, Some(Point::new(2, 2)), [0, 0], &rules)
+            hash_state(
+                position,
+                Color::Black,
+                Some(Point::new(2, 2)),
+                [0, 0],
+                history,
+                &rules
+            )
         );
         // Komi and rule variations.
         let komi6 = Ruleset::new(rules.scoring, rules.ko, rules.suicide, 6.5);
-        assert_ne!(base, hash_state(position, Color::Black, None, [0, 0], &komi6));
-        let psk = Ruleset::new(rules.scoring, KoRule::PositionalSuperKo, rules.suicide, rules.komi);
-        assert_ne!(base, hash_state(position, Color::Black, None, [0, 0], &psk));
+        assert_ne!(
+            base,
+            hash_state(position, Color::Black, None, [0, 0], history, &komi6)
+        );
+        let nearby_komi = Ruleset::new(rules.scoring, rules.ko, rules.suicide, 7.5001);
+        assert_ne!(
+            base,
+            hash_state(position, Color::Black, None, [0, 0], history, &nearby_komi,)
+        );
+        let psk = Ruleset::new(
+            rules.scoring,
+            KoRule::PositionalSuperKo,
+            rules.suicide,
+            rules.komi,
+        );
+        assert_ne!(
+            base,
+            hash_state(position, Color::Black, None, [0, 0], history, &psk)
+        );
+        assert_ne!(
+            base,
+            hash_state(position, Color::Black, None, [0, 0], history ^ 1, &rules)
+        );
         // Same inputs reproduce the same hash.
         assert_eq!(
             base,
-            hash_state(position, Color::Black, None, [0, 0], &rules)
+            hash_state(position, Color::Black, None, [0, 0], history, &rules)
         );
     }
 }

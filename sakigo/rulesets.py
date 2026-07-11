@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
@@ -195,6 +196,8 @@ class RulesetSpec:
         object.__setattr__(self, "suicide", normalize_suicide(self.suicide))
         object.__setattr__(self, "katago_rules", katago_rules)
         object.__setattr__(self, "komi", float(self.komi))
+        if not math.isfinite(self.komi):
+            raise ValueError("komi must be finite")
         katago_ko = self.katago_ko or infer_katago_ko(katago_rules) or self.ko
         katago_suicide = self.katago_suicide or infer_katago_suicide(katago_rules) or self.suicide
         object.__setattr__(self, "katago_ko", normalize_katago_ko(katago_ko))

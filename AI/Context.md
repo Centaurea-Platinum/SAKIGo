@@ -17,21 +17,21 @@ The repo is no longer design-only. It now has:
 - `Distillation/`: local KataGo teacher assets; downloaded engines/models are artifacts, not source.
 - `Training/data`, `Training/runs`: pre-rebuild datasets and checkpoints (legacy code deleted at the P6 cutover; checkpoints still load via `sakigo.model.remap_legacy_scalar_state_dict`).
 
-Search, final scoring/adjudication beyond Tromp-Taylor eval, self-play training, and exact KataGo teacher projection are still not implemented.
+Search, non-area final scoring/adjudication, self-play training, and exact KataGo teacher projection are still not implemented.
 
 ## Implementation map
 
-- [Engine/README.md](../Engine/README.md) - Rust rules/encoding engine. Owns board topology, captures, suicide, simple ko, positional superko, pass moves, history hashes, capture accounting, and feature encoding. Python binding: build with a repo-local `CARGO_HOME` (see [Engine/.cargo/config.toml](../Engine/.cargo/config.toml)), `uvx maturin build --manifest-path Engine/Cargo.toml --release --out dist`, then `uv pip install dist/*.whl`.
+- [Engine/README.md](../Engine/README.md) - Rust rules/encoding engine. Owns board topology, captures, suicide, ko/superko, history-aware cache hashes, feature encoding, combined model inputs/legal mask, and area scoring. Python binding: build with `uvx maturin build --manifest-path Engine/Cargo.toml --release --features python --out dist`, then install the wheel.
 - [equivariant_attention/](../equivariant_attention) - reusable finite-group equivariant attention package. Provides `FiniteGroupSpec`, trivial/Cn/D4 square-grid presets, regular-representation linear/norm/MLP layers, invariant pooling, spatial self-attention, and spatial/register cross-attention. Tensor shapes: spatial `[B,C,G,H,W]`, registers `[B,R,C,G]`.
-- [sakigo/CONTRACTS.md](../sakigo/CONTRACTS.md) - frozen cross-module contracts: record schema v1, board planes, rule features, model forward contract, loss semantics, hash split, checkpoint payload, run-dir layout.
+- [sakigo/CONTRACTS.md](../sakigo/CONTRACTS.md) - versioned contracts: strict record schema v1, canonical prepared split v2, checkpoint schema v3, model/loss semantics, and run-dir layout.
 - `sakigo/model/` - unified `SakiGoNet` with `group_size ∈ {1, 8}` (scalar control = 1); no forward-time caches (torch.compile-clean); model specs live as packaged JSON in `sakigo/model/specs/`. The D4 attention primitives are compatibility wrappers over `equivariant_attention`; register width can now differ from trunk width.
-- `sakigo/data/` - record validation, blake2b position split, JSONL(.zst) → mmap tensor shards (`prepare.py`), map-style `PreparedDataset` with batched `__getitems__`, `RulesetBalancedBatchSampler` + standard DataLoader, D4 augmentation.
-- `sakigo/train/` - `python -m sakigo.train`: torch.compile (default on), bf16 autocast, fused AdamW, SequentialLR warmup-cosine, TensorBoard + metrics.csv mirror (Viewer-compatible; omitted `log_interval` follows `checkpoint_interval`), tqdm, atomic `weights_only=True` checkpoints with RNG capture, TOML/CLI config. `python -m sakigo.train.benchmark` = WDDM-aware batch-size sweep. `python -m sakigo.train.suite` = source-owned multi-spec suite runner with structured `data/`, `prepared/`, `generation/`, `train/<spec>/`, `logs/`, `sweeps/`, and `scripts/` folders.
-- `sakigo/generate/` - `python -m sakigo.generate`: Phase 1 KataGo teacher generation on the Rust engine (client/plan/records/writer/run modules), zstd shards + status.json.
-- `sakigo/eval/` - `python -m sakigo.eval`: paired color-reversed policy matches, Tromp-Taylor adjudication, Elo + Wilson CI, JSONL/SGF dumps.
+- `sakigo/data/` - strict record validation, canonical model-input split, JSONL(.zst) → immutable-generation mmap shards with atomic manifest switch, a stateful balanced sampler, and checkpointable D4 augmentation.
+- `sakigo/train/` - validated config, lazy torch.compile fallback, bf16/fused AdamW, failure status, and atomic safe checkpoints with global/sampler/augmentation RNG state for bit-exact `num_workers=0` resume; benchmark and suite entry points remain available.
+- `sakigo/generate/` - Phase 1 KataGo generation with forced Black-perspective labels, owned/reaped subprocesses, response timeout, failure status, and atomic zstd shards with explicit overwrite semantics.
+- `sakigo/eval/` - safe checkpoint loading, paired color-reversed policy matches, engine-owned area scoring, honest draw/void outcomes, paired uncertainty, and JSONL/SGF dumps.
 - [pyproject.toml](../pyproject.toml) - Python 3.12, CUDA PyTorch `2.11.0+cu128`, tensorboard, tqdm, triton-windows (torch.compile works on this machine).
 
-- [sakigo/model/specs/ModelSpecs.json](../sakigo/model/specs/ModelSpecs.json) - JSON model specs consumed by `sakigo/model/specs.py`. Defines `non-bottleneck`, `plain`, and `swiglu` experiment specs with reusable stem/head shape files; `register_channel` / `register_bottleneck_channel` decouple register-stream width from `expanded_channel` / `bottleneck_channel`.
+- [sakigo/model/specs/ModelSpecs.json](../sakigo/model/specs/ModelSpecs.json) - packaged `non-bottleneck`, `plain`, `swiglu`, and directly trainable `scalar-control` specs.
 
 ## Boundary
 

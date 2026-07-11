@@ -4,7 +4,7 @@ numpy memmaps with zero JSON cost.
 
 Layout under out_dir/:
   manifest.json
-  <split>_<N>/board_planes.npy, rule_features.npy, ply.npy, ruleset_code.npy,
+  generation_<id>/<split>_<N>/board_planes.npy, rule_features.npy, ply.npy, ruleset_code.npy,
               wdl.npy + wdl_mask.npy, score.npy + score_mask.npy,
               ownership.npy + ownership_mask.npy, policy.npy + policy_mask.npy,
               budget.npy + budget_mask.npy, legal_mask.npy + legal_available.npy
@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 
@@ -24,11 +25,29 @@ from sakigo.data.records import (
     VAL_SPLIT,
     expand_data_paths,
     iter_records,
-    split_for_position,
+    split_for_record,
 )
 
 MANIFEST_NAME = "manifest.json"
-PREPARE_FORMAT_VERSION = 1
+PREPARE_FORMAT_VERSION = 2
+PREPARED_ARRAY_NAMES = (
+    "board_planes",
+    "rule_features",
+    "ply",
+    "ruleset_code",
+    "wdl",
+    "wdl_mask",
+    "score",
+    "score_mask",
+    "ownership",
+    "ownership_mask",
+    "policy",
+    "policy_mask",
+    "budget",
+    "budget_mask",
+    "legal_mask",
+    "legal_available",
+)
 
 
 @dataclass(frozen=True)
@@ -46,8 +65,14 @@ def _source_fingerprint(paths: list[Path]) -> list[dict[str, object]]:
     ]
 
 
-def _group_dir(out_dir: Path, split: str, board_size: int) -> Path:
-    return out_dir / f"{split}_{board_size:02d}"
+def _group_dir(
+    out_dir: Path,
+    split: str,
+    board_size: int,
+    generation: str | None = None,
+) -> Path:
+    root = out_dir / generation if generation is not None else out_dir
+    return root / f"{split}_{board_size:02d}"
 
 
 def load_manifest(out_dir: Path) -> dict[str, object]:
@@ -63,14 +88,29 @@ def manifest_is_current(
     manifest_path = out_dir / MANIFEST_NAME
     if not manifest_path.exists():
         return False
-    manifest = load_manifest(out_dir)
-    return (
+    try:
+        manifest = load_manifest(out_dir)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    metadata_matches = (
         manifest.get("prepare_format_version") == PREPARE_FORMAT_VERSION
         and manifest.get("schema_version") == SCHEMA_VERSION
         and manifest.get("seed") == seed
         and manifest.get("val_fraction") == val_fraction
         and manifest.get("sources") == _source_fingerprint(data_paths)
     )
+    if not metadata_matches:
+        return False
+    groups = manifest.get("groups")
+    if not isinstance(groups, list) or not groups:
+        return False
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("directory"), str):
+            return False
+        directory = out_dir / group["directory"]
+        if not all((directory / f"{name}.npy").is_file() for name in PREPARED_ARRAY_NAMES):
+            return False
+    return True
 
 
 def prepare_tensor_shards(
@@ -86,15 +126,14 @@ def prepare_tensor_shards(
     out_dir.mkdir(parents=True, exist_ok=True)
     if not force and manifest_is_current(out_dir, data_paths, seed, val_fraction):
         return load_manifest(out_dir)
+    generation = f"generation_{uuid4().hex}"
 
     # Pass 1: per-(split, size) counts and the ruleset key table.
     counts: dict[tuple[str, int], int] = {}
     ruleset_keys: list[str] = []
     ruleset_index: dict[str, int] = {}
     for record in iter_records(data_paths):
-        split = split_for_position(
-            record.board_size, record.position_key, val_fraction, seed, record.ruleset_key
-        )
+        split = split_for_record(record, val_fraction, seed)
         counts[(split, record.board_size)] = counts.get((split, record.board_size), 0) + 1
         if record.ruleset_key not in ruleset_index:
             ruleset_index[record.ruleset_key] = len(ruleset_keys)
@@ -106,7 +145,7 @@ def prepare_tensor_shards(
     writers: dict[tuple[str, int], dict[str, np.memmap]] = {}
     cursors: dict[tuple[str, int], int] = {}
     for (split, board_size), count in counts.items():
-        directory = _group_dir(out_dir, split, board_size)
+        directory = _group_dir(out_dir, split, board_size, generation)
         directory.mkdir(parents=True, exist_ok=True)
         area = board_size * board_size
         action = area + 1
@@ -137,9 +176,7 @@ def prepare_tensor_shards(
         cursors[(split, board_size)] = 0
 
     for record in iter_records(data_paths):
-        split = split_for_position(
-            record.board_size, record.position_key, val_fraction, seed, record.ruleset_key
-        )
+        split = split_for_record(record, val_fraction, seed)
         key = (split, record.board_size)
         row = cursors[key]
         cursors[key] = row + 1
@@ -173,6 +210,8 @@ def prepare_tensor_shards(
         assert cursors[key] == counts[key]
         for array in arrays.values():
             array.flush()
+    del array, arrays
+    writers.clear()
 
     manifest = {
         "prepare_format_version": PREPARE_FORMAT_VERSION,
@@ -181,12 +220,15 @@ def prepare_tensor_shards(
         "val_fraction": val_fraction,
         "sources": _source_fingerprint(data_paths),
         "ruleset_keys": ruleset_keys,
+        "generation": generation,
         "groups": [
             {
                 "split": split,
                 "board_size": board_size,
                 "count": count,
-                "directory": _group_dir(out_dir, split, board_size).name,
+                "directory": str(
+                    _group_dir(out_dir, split, board_size, generation).relative_to(out_dir)
+                ),
             }
             for (split, board_size), count in sorted(counts.items())
         ],

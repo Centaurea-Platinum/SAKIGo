@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install Python dependencies
+        run: uv sync --frozen
+
+      - name: Verify Rust engine
+        working-directory: Engine
+        run: |
+          cargo test
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Build and install native binding
+        run: |
+          uvx maturin build --manifest-path Engine/Cargo.toml --release --features python --out dist
+          uv pip install dist/sakigo_engine-*.whl
+
+      - name: Require native integration
+        run: |
+          uv run --frozen python -c "from sakigo.engine import ENGINE_AVAILABLE; assert ENGINE_AVAILABLE"
+          uv run --frozen pytest tests/test_engine_binding.py tests/test_generate.py --basetemp=.pytest-tmp/ci-native -p no:cacheprovider
+
+      - name: Run complete Python suite
+        run: uv run --frozen pytest --basetemp=.pytest-tmp/ci-full -p no:cacheprovider

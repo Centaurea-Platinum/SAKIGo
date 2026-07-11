@@ -12,7 +12,7 @@ from sakigo.model.specs import SPEC_DIR, config_from_spec, model_from_spec, mode
 
 
 def test_spec_names() -> None:
-    assert model_spec_names() == ("non-bottleneck", "plain", "swiglu")
+    assert model_spec_names() == ("non-bottleneck", "plain", "swiglu", "scalar-control")
 
 
 @pytest.mark.parametrize("name", ["non-bottleneck", "plain", "swiglu"])
@@ -20,6 +20,12 @@ def test_all_specs_build(name: str) -> None:
     config = config_from_spec(name)
     assert config.architecture == "SakiGoModel"
     assert config.board_size == 32
+
+
+def test_scalar_control_is_available_to_training() -> None:
+    config = config_from_spec("scalar-control")
+    assert config.architecture == "ScalarSakiGoModel"
+    assert config.group_size == 1
 
 
 def test_plain_uses_narrower_register_stream() -> None:

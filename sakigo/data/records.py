@@ -1,8 +1,8 @@
 """Record schema, JSONL IO, validation, split hashing, D4 augmentation, collate.
 
 Ported behavior-identically from Training/common.py and Training/data.py —
-these implement the frozen contracts in sakigo/CONTRACTS.md (record schema,
-split hashing, batch layout). Do not change semantics here.
+these implement the versioned contracts in sakigo/CONTRACTS.md (record schema,
+canonical split hashing, batch layout).
 """
 
 from __future__ import annotations
@@ -205,6 +205,10 @@ def _optional_legal_mask(source: Mapping[str, Any], expected: int) -> np.ndarray
         raise ValueError("legal_mask must be a list")
     if len(raw) != expected:
         raise ValueError(f"legal_mask must have length {expected}")
+    if any(type(value) is not bool for value in raw):
+        raise ValueError("legal_mask must contain only JSON booleans")
+    if not raw[-1]:
+        raise ValueError("legal_mask pass entry must be true")
     return np.asarray(raw, dtype=bool)
 
 
@@ -226,7 +230,7 @@ def record_from_json(raw: Mapping[str, Any], path: Path | None = None, line_numb
         board_size = int(raw["board_size"])
         ply = int(raw["ply"])
         position_key = str(raw["position_key"])
-        schema_version = int(raw.get("schema_version", raw.get("version", SCHEMA_VERSION)))
+        schema_version = int(raw["schema_version"])
     except KeyError as exc:
         raise ValueError(f"{label} is missing field {exc}") from exc
     if schema_version != SCHEMA_VERSION:
@@ -247,6 +251,8 @@ def record_from_json(raw: Mapping[str, Any], path: Path | None = None, line_numb
     board_planes = board_planes.reshape(BOARD_PLANE_COUNT, board_size, board_size)
     rule_features = _float_array(raw.get("rule_features"), RULE_FEATURE_COUNT, "rule_features")
     ruleset = _record_ruleset(raw)
+    if ruleset is None:
+        raise ValueError(f"{label} must provide a schema-v1 ruleset object")
     parsed_ruleset = ruleset_from_metadata(ruleset)
     validate_rule_features(rule_features, parsed_ruleset)
     ownership = _optional_vector(targets, "ownership", area)
@@ -254,6 +260,20 @@ def record_from_json(raw: Mapping[str, Any], path: Path | None = None, line_numb
         raise ValueError("ownership values must be in [-1, 1]")
 
     legal_source = targets if "legal_mask" in targets else raw
+    policy = _optional_distribution(targets, "policy", action_count)
+    budget = _optional_distribution(targets, "budget", action_count)
+    legal_mask = _optional_legal_mask(legal_source, action_count)
+    if policy is not None:
+        active = np.flatnonzero(policy > 1e-6)
+        if len(active) != 1 or not np.isclose(float(policy[active[0]]), 1.0, atol=1e-6):
+            raise ValueError("policy must be a one-hot top-1 distribution")
+    if legal_mask is not None:
+        illegal = ~legal_mask
+        if policy is not None and float(policy[illegal].sum()) > 1e-6:
+            raise ValueError("policy must assign zero mass to illegal actions")
+        if budget is not None and float(budget[illegal].sum()) > 1e-6:
+            raise ValueError("budget must assign zero mass to illegal actions")
+
     record = TrainingRecord(
         schema_version=schema_version,
         board_size=board_size,
@@ -266,9 +286,9 @@ def record_from_json(raw: Mapping[str, Any], path: Path | None = None, line_numb
         wdl=_optional_distribution(targets, "wdl", len(WDL_LABELS)),
         score=_optional_score(targets),
         ownership=ownership,
-        policy=_optional_distribution(targets, "policy", action_count),
-        budget=_optional_distribution(targets, "budget", action_count),
-        legal_mask=_optional_legal_mask(legal_source, action_count),
+        policy=policy,
+        budget=budget,
+        legal_mask=legal_mask,
     )
     if all(getattr(record, key) is None for key in ("wdl", "score", "ownership", "policy", "budget")):
         raise ValueError(f"{label} must provide at least one target")
@@ -302,6 +322,24 @@ def split_for_position(
     value = int.from_bytes(blake2b(key, digest_size=8).digest(), byteorder="big")
     fraction = value / float(1 << 64)
     return VAL_SPLIT if fraction < val_fraction else TRAIN_SPLIT
+
+
+def canonical_position_key(record: TrainingRecord) -> str:
+    """Stable identity of the exact model-visible input, independent of move order."""
+    digest = blake2b(digest_size=20)
+    digest.update(np.asarray(record.board_planes, dtype="<f4").tobytes(order="C"))
+    digest.update(np.asarray(record.rule_features, dtype="<f4").tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def split_for_record(record: TrainingRecord, val_fraction: float, seed: int) -> str:
+    return split_for_position(
+        record.board_size,
+        canonical_position_key(record),
+        val_fraction,
+        seed,
+        record.ruleset_key,
+    )
 
 
 def _d4_transform_planes(array: np.ndarray, transform: int) -> np.ndarray:

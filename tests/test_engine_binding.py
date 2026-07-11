@@ -91,3 +91,19 @@ def test_encoding_contract() -> None:
     assert features[5] == 1.0  # positional superko
     assert features[6] == 1.0  # suicide allowed
     assert features[8] == pytest.approx(7.5 / 25)  # White to move: +komi/area
+
+    board_once, rules_once, legal_once = game.model_inputs()
+    assert board_once == game.board_planes()
+    assert rules_once == game.rule_features()
+    assert legal_once == game.legal_mask()
+
+
+def test_binding_rejects_non_finite_komi() -> None:
+    with pytest.raises(ValueError, match="komi must be finite"):
+        Game(5, "area", "positional_superko", "allowed", float("nan"))
+
+
+def test_engine_area_scoring_and_unsupported_rules() -> None:
+    assert _game("tromp-taylor", 5).final_score() == pytest.approx(-7.5)
+    with pytest.raises(ValueError, match="unsupported final scoring rule"):
+        _game("ancient-chinese", 5).final_score()

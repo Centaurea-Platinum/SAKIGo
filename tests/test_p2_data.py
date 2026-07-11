@@ -5,6 +5,7 @@ with balanced rulesets and the contract layout.
 
 from __future__ import annotations
 
+import copy
 import json
 import random
 from pathlib import Path
@@ -22,7 +23,7 @@ from sakigo.data import (
     prepare_tensor_shards,
 )
 from sakigo.data.prepare import load_manifest
-from sakigo.data.records import augment_record_d4, record_from_json, split_for_position
+from sakigo.data.records import augment_record_d4, record_from_json, split_for_record
 from sakigo.rulesets import ruleset_from_name
 
 SEED = 11
@@ -35,8 +36,11 @@ def _make_raw_record(rng: random.Random, board_size: int, ruleset_name: str, ply
     action = area + 1
     captures = [rng.randrange(4), rng.randrange(4)]
     to_move = rng.choice((1, -1))
-    policy = [rng.random() for _ in range(action)]
-    budget = [rng.random() for _ in range(action)]
+    legal_mask = [rng.random() > 0.2 for _ in range(area)] + [True]
+    legal_actions = [index for index, legal in enumerate(legal_mask) if legal]
+    policy = [0.0 for _ in range(action)]
+    policy[rng.choice(legal_actions)] = 1.0
+    budget = [rng.random() if legal else 0.0 for legal in legal_mask]
     wdl = [rng.random() for _ in range(4)]
     return {
         "schema_version": 1,
@@ -51,9 +55,9 @@ def _make_raw_record(rng: random.Random, board_size: int, ruleset_name: str, ply
         "wdl": [value / sum(wdl) for value in wdl],
         "score": rng.uniform(-0.5, 0.5),
         "ownership": [rng.uniform(-1.0, 1.0) for _ in range(area)],
-        "policy": [value / sum(policy) for value in policy],
+        "policy": policy,
         "budget": [value / sum(budget) for value in budget],
-        "legal_mask": [rng.random() > 0.2 for _ in range(area)] + [True],
+        "legal_mask": legal_mask,
         "source": {"generator": "test"},
     }
 
@@ -78,9 +82,7 @@ def test_split_membership_matches_hash_split(prepared: tuple[Path, Path]) -> Non
     manifest = load_manifest(out_dir)
     expected_counts: dict[tuple[str, int], int] = {}
     for record in iter_records([jsonl_path]):
-        split = split_for_position(
-            record.board_size, record.position_key, VAL_FRACTION, SEED, record.ruleset_key
-        )
+        split = split_for_record(record, VAL_FRACTION, SEED)
         expected_counts[(split, record.board_size)] = (
             expected_counts.get((split, record.board_size), 0) + 1
         )
@@ -100,9 +102,7 @@ def test_prepared_arrays_round_trip(prepared: tuple[Path, Path]) -> None:
     with jsonl_path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             legacy = record_from_json(json.loads(line), jsonl_path, line_number)
-            split = split_for_position(
-                legacy.board_size, legacy.position_key, VAL_FRACTION, SEED, legacy.ruleset_key
-            )
+            split = split_for_record(legacy, VAL_FRACTION, SEED)
             dataset = datasets[split]
             group = next(g for g in dataset.groups if g.board_size == legacy.board_size)
             row = cursors.get((split, legacy.board_size), 0)
@@ -129,6 +129,62 @@ def test_prepare_is_cached(prepared: tuple[Path, Path]) -> None:
     assert manifest_after == manifest_before
 
 
+def test_force_prepare_atomically_switches_generation(prepared: tuple[Path, Path]) -> None:
+    jsonl_path, out_dir = prepared
+    before = load_manifest(out_dir)
+    old_directories = [out_dir / group["directory"] for group in before["groups"]]
+    after = prepare_tensor_shards(
+        [jsonl_path], out_dir, seed=SEED, val_fraction=VAL_FRACTION, force=True
+    )
+    assert after["generation"] != before["generation"]
+    assert all(path.is_dir() for path in old_directories)
+    assert all((out_dir / group["directory"]).is_dir() for group in after["groups"])
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda raw: raw["legal_mask"].__setitem__(0, "false"), "JSON booleans"),
+        (lambda raw: raw["legal_mask"].__setitem__(-1, False), "pass entry"),
+        (
+            lambda raw: raw.update(policy=[1.0 / len(raw["policy"])] * len(raw["policy"])),
+            "one-hot",
+        ),
+        (
+            lambda raw: (
+                raw["legal_mask"].__setitem__(0, False),
+                raw.update(budget=[1.0] + [0.0] * (len(raw["budget"]) - 1)),
+            ),
+            "illegal actions",
+        ),
+    ],
+)
+def test_record_contract_rejects_malformed_targets(mutate, message: str) -> None:
+    raw = _make_raw_record(random.Random(13), 5, "tromp-taylor", 0)
+    mutate(raw)
+    with pytest.raises(ValueError, match=message):
+        record_from_json(raw)
+
+
+@pytest.mark.parametrize("field", ["schema_version", "ruleset"])
+def test_record_contract_requires_version_and_ruleset(field: str) -> None:
+    raw = _make_raw_record(random.Random(19), 5, "tromp-taylor", 0)
+    raw.pop(field)
+    with pytest.raises(ValueError):
+        record_from_json(raw)
+
+
+def test_canonical_split_ignores_move_path_identity() -> None:
+    raw = _make_raw_record(random.Random(17), 5, "tromp-taylor", 0)
+    transposed = copy.deepcopy(raw)
+    transposed["position_key"] = "different-move-order"
+    first = record_from_json(raw)
+    second = record_from_json(transposed)
+    assert split_for_record(first, VAL_FRACTION, SEED) == split_for_record(
+        second, VAL_FRACTION, SEED
+    )
+
+
 def test_batches_are_single_size_and_ruleset_balanced(prepared: tuple[Path, Path]) -> None:
     _, out_dir = prepared
     dataset = PreparedDataset(out_dir, "train")
@@ -146,6 +202,39 @@ def test_batches_are_single_size_and_ruleset_balanced(prepared: tuple[Path, Path
         assert max(code_counts.values()) - min(code_counts.values()) <= 1
 
 
+def test_sampler_state_round_trip(prepared: tuple[Path, Path]) -> None:
+    _, out_dir = prepared
+    dataset = PreparedDataset(out_dir, "train")
+    first = RulesetBalancedBatchSampler(dataset, batch_size=9, seed=23)
+    iterator = iter(first)
+    for _ in range(7):
+        next(iterator)
+    state = first.state_dict()
+    expected = [next(iterator) for _ in range(8)]
+
+    resumed = RulesetBalancedBatchSampler(dataset, batch_size=9, seed=999)
+    resumed.load_state_dict(state)
+    resumed_iterator = iter(resumed)
+    actual = [next(resumed_iterator) for _ in range(8)]
+    assert actual == expected
+
+
+def test_augmentation_rng_state_round_trip(prepared: tuple[Path, Path]) -> None:
+    _, out_dir = prepared
+    first = PreparedDataset(out_dir, "train", augment_d4=True)
+    indices = list(range(min(6, len(first))))
+    for index in indices:
+        first[index]
+    state = first.augmentation_state_dict()
+    expected = [first[index]["board_planes"] for index in indices]
+
+    resumed = PreparedDataset(out_dir, "train", augment_d4=True)
+    resumed.load_augmentation_state_dict(state)
+    actual = [resumed[index]["board_planes"] for index in indices]
+    for expected_array, actual_array in zip(expected, actual):
+        np.testing.assert_array_equal(actual_array, expected_array)
+
+
 def test_collate_layout_and_values(prepared: tuple[Path, Path]) -> None:
     jsonl_path, out_dir = prepared
     dataset = PreparedDataset(out_dir, "train")
@@ -156,9 +245,7 @@ def test_collate_layout_and_values(prepared: tuple[Path, Path]) -> None:
         record
         for record in iter_records([jsonl_path])
         if record.board_size == 5
-        and split_for_position(
-            record.board_size, record.position_key, VAL_FRACTION, SEED, record.ruleset_key
-        )
+        and split_for_record(record, VAL_FRACTION, SEED)
         == "train"
     ][:4]
     area = 25

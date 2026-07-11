@@ -11,6 +11,7 @@ use crate::board::{Color, Point};
 use crate::encoder::EncodedPosition;
 use crate::game::{GameState, GoMove};
 use crate::rules::{KoRule, Ruleset, ScoringRule, SuicideRule};
+use crate::scoring::final_area_score;
 
 fn parse_scoring(raw: &str) -> PyResult<ScoringRule> {
     match raw {
@@ -18,7 +19,9 @@ fn parse_scoring(raw: &str) -> PyResult<ScoringRule> {
         "area_ancient_chinese" => Ok(ScoringRule::AreaAncientChinese),
         "territory" => Ok(ScoringRule::Territory),
         "territory_with_seki_score" => Ok(ScoringRule::TerritoryWithSekiScore),
-        _ => Err(PyValueError::new_err(format!("unknown scoring rule {raw:?}"))),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown scoring rule {raw:?}"
+        ))),
     }
 }
 
@@ -34,7 +37,9 @@ fn parse_suicide(raw: &str) -> PyResult<SuicideRule> {
     match raw {
         "allowed" => Ok(SuicideRule::Allowed),
         "forbidden" => Ok(SuicideRule::Forbidden),
-        _ => Err(PyValueError::new_err(format!("unknown suicide rule {raw:?}"))),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown suicide rule {raw:?}"
+        ))),
     }
 }
 
@@ -56,6 +61,9 @@ impl PyGame {
     #[new]
     #[pyo3(signature = (board_size, scoring, ko, suicide, komi=7.5))]
     fn new(board_size: usize, scoring: &str, ko: &str, suicide: &str, komi: f32) -> PyResult<Self> {
+        if !komi.is_finite() {
+            return Err(PyValueError::new_err("komi must be finite"));
+        }
         let rules = Ruleset::new(
             parse_scoring(scoring)?,
             parse_ko(ko)?,
@@ -144,7 +152,36 @@ impl PyGame {
 
     /// The 10 rule features (one-hots + mover-signed komi/area, capture-diff/area).
     fn rule_features(&self) -> Vec<f32> {
-        EncodedPosition::from_state(&self.state).rule_features.to_vec()
+        EncodedPosition::from_state(&self.state)
+            .rule_features
+            .to_vec()
+    }
+
+    /// Return board planes, rule features, and legal mask from one legality scan.
+    fn model_inputs(&self) -> (Vec<f32>, Vec<f32>, Vec<bool>) {
+        let encoded = EncodedPosition::from_state(&self.state);
+        let area = self.board_size * self.board_size;
+        let empty_offset = crate::encoder::BoardPlane::EmptyPositions as usize * area;
+        let illegal_offset = crate::encoder::BoardPlane::NonTrivialIllegal as usize * area;
+        let mut legal_mask = Vec::with_capacity(area + 1);
+        for cell in 0..area {
+            legal_mask.push(
+                encoded.board_planes[empty_offset + cell] > 0.5
+                    && encoded.board_planes[illegal_offset + cell] < 0.5,
+            );
+        }
+        legal_mask.push(true);
+        (
+            encoded.board_planes,
+            encoded.rule_features.to_vec(),
+            legal_mask,
+        )
+    }
+
+    /// Final Tromp-Taylor/Chinese area score, Black minus White.
+    fn final_score(&self) -> PyResult<f32> {
+        final_area_score(self.state.board(), self.state.rules())
+            .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 }
 

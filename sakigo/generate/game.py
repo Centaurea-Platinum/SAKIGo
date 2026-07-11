@@ -6,7 +6,7 @@ Legality, board state, captures, and the model encoding all come from
 sakigo.engine (single rules implementation); the preset rulesets project
 exactly onto KataGo's play rules (enforced by RulesetSpec), and the Rust
 engine's agreement with the legacy generator Game is pinned by
-tests/test_p4_engine.py.
+    tests/test_engine_binding.py.
 """
 
 from __future__ import annotations
@@ -91,6 +91,12 @@ class GeneratorGame:
 
     def rule_features(self) -> list[float]:
         return self.engine.rule_features()
+
+    def model_inputs(self) -> tuple[list[float], list[float], list[bool]]:
+        if hasattr(self.engine, "model_inputs"):
+            board, rules, legal = self.engine.model_inputs()
+            return list(board), list(rules), list(legal)
+        return self.board_planes(), self.rule_features(), self.legal_mask()
 
     def play(self, action: int) -> None:
         color = "B" if self.engine.to_move == BLACK else "W"

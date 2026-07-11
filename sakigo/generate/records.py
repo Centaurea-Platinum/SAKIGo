@@ -62,7 +62,7 @@ def record_from_response(
     if not isinstance(ownership, list) or len(ownership) != game.area:
         raise ValueError(f"bad ownership in response {response.get('id')}")
 
-    legal_mask = game.legal_mask()
+    board_planes, rule_features, legal_mask = game.model_inputs()
     budget = normalize_policy([float(value) for value in raw_policy], legal_mask)
     policy = one_hot_top1(budget)
 
@@ -85,8 +85,8 @@ def record_from_response(
         "ply": game.ply,
         "position_key": game.position_key(),
         "ruleset": game.ruleset.metadata(),
-        "board_planes": game.board_planes(),
-        "rule_features": game.rule_features(),
+        "board_planes": board_planes,
+        "rule_features": rule_features,
         "wdl": wdl,
         "score": score,
         "ownership": ownership_target,

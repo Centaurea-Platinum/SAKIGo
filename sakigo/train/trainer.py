@@ -27,7 +27,7 @@ from sakigo.data import (
     prepare_tensor_shards,
 )
 from sakigo.model import SakiGoNet, config_from_dict as model_config_from_dict, config_from_spec
-from sakigo.train.config import TrainConfig, config_from_dict as train_config_from_dict
+from sakigo.train.config import TrainConfig, validate_train_config
 from sakigo.train.losses import LossWeights, compute_head_losses, weighted_total_loss
 from sakigo.train.metrics import (
     MetricAccumulator,
@@ -38,7 +38,7 @@ from sakigo.train.metrics import (
     write_metrics_header,
 )
 
-CHECKPOINT_SCHEMA_VERSION = 2
+CHECKPOINT_SCHEMA_VERSION = 3
 
 
 def resolve_device(raw: str) -> torch.device:
@@ -104,6 +104,7 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 class Trainer:
     def __init__(self, config: TrainConfig) -> None:
+        validate_train_config(config)
         self.config = config
         self.device = resolve_device(config.device)
         torch.set_float32_matmul_precision("high")
@@ -131,6 +132,8 @@ class Trainer:
         self.optimizer = self._make_optimizer()
         self.scheduler = make_scheduler(self.optimizer, config)
         self.start_step = 0
+        self._pending_sampler_state: dict[str, object] | None = None
+        self._pending_augmentation_state: dict[str, object] | None = None
         if config.resume:
             self._resume(Path(config.resume))
         self.compiled_model = self._compile_model()
@@ -192,16 +195,20 @@ class Trainer:
         self.prepared_dir = prepared_dir
 
         self.train_dataset = PreparedDataset(prepared_dir, "train", augment_d4=config.augment_d4)
-        train_sampler = RulesetBalancedBatchSampler(
+        if self._pending_augmentation_state is not None:
+            self.train_dataset.load_augmentation_state_dict(self._pending_augmentation_state)
+        self.train_sampler = RulesetBalancedBatchSampler(
             self.train_dataset,
             config.batch_size,
             seed=config.seed,
             board_weights=config.board_weights,
         )
+        if self._pending_sampler_state is not None:
+            self.train_sampler.load_state_dict(self._pending_sampler_state)
         pin = self.device.type == "cuda"
         self.train_loader = make_dataloader(
             self.train_dataset,
-            train_sampler,
+            self.train_sampler,
             num_workers=config.num_workers,
             pin_memory=pin,
             seed=config.seed,
@@ -239,7 +246,7 @@ class Trainer:
 
     def _checkpoint_payload(self, step: int) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "step": step,
             "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
@@ -250,9 +257,13 @@ class Trainer:
                 "torch": torch.get_rng_state(),
                 "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             },
+            "sampler_state": self.train_sampler.state_dict(),
+            "augmentation_state": self.train_dataset.augmentation_state_dict(),
+            "sampler_state_exact": self.config.num_workers == 0,
         }
-        if self.scheduler is not None:
-            payload["scheduler_state"] = self.scheduler.state_dict()
+        payload["scheduler_state"] = (
+            self.scheduler.state_dict() if self.scheduler is not None else None
+        )
         return payload
 
     def save_checkpoint(self, step: int) -> Path:
@@ -265,6 +276,22 @@ class Trainer:
 
     def _resume(self, path: Path) -> None:
         payload = torch.load(path, map_location=self.device, weights_only=True)
+        schema_version = int(
+            payload.get("schema_version", payload.get("checkpoint_schema_version", 1))
+        )
+        if schema_version > CHECKPOINT_SCHEMA_VERSION:
+            raise ValueError(
+                f"checkpoint schema {schema_version} is newer than supported "
+                f"schema {CHECKPOINT_SCHEMA_VERSION}"
+            )
+        if payload.get("sampler_state") is not None:
+            if not payload.get("sampler_state_exact", False):
+                raise ValueError(
+                    "checkpoint sampler state was captured with num_workers>0 and is not exact"
+                )
+            self._pending_sampler_state = payload["sampler_state"]
+        if payload.get("augmentation_state") is not None:
+            self._pending_augmentation_state = payload["augmentation_state"]
         model_config = model_config_from_dict(payload["model_config"])
         if asdict(model_config) != asdict(self.model_config):
             self.model_config = model_config
@@ -276,7 +303,7 @@ class Trainer:
             self.optimizer.load_state_dict(payload["optimizer_state"])
         except ValueError as error:
             print(f"warning: optimizer state not restored ({error})", flush=True)
-        if self.scheduler is not None and "scheduler_state" in payload:
+        if self.scheduler is not None and payload.get("scheduler_state") is not None:
             self.scheduler.load_state_dict(payload["scheduler_state"])
         rng = payload.get("rng", {})
         if "python" in rng:
@@ -301,7 +328,7 @@ class Trainer:
         self.compiled_model.train()
         self.optimizer.zero_grad(set_to_none=True)
         with self._autocast():
-            output = self.compiled_model(batch["board"], batch["rules"])
+            output = self._forward(batch)
             head_losses = compute_head_losses(output, batch)
             total = weighted_total_loss(head_losses, self.loss_weights)
         total.backward()
@@ -311,6 +338,16 @@ class Trainer:
         if self.scheduler is not None:
             self.scheduler.step()
         return output, head_losses, total
+
+    def _forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        try:
+            return self.compiled_model(batch["board"], batch["rules"])
+        except Exception as error:
+            if self.compiled_model is self.model:
+                raise
+            self.compile_status = f"runtime-failed:{error}"
+            self.compiled_model = self.model
+            return self.model(batch["board"], batch["rules"])
 
     @torch.no_grad()
     def evaluate(self, batches: int) -> MetricAccumulator:
@@ -325,7 +362,7 @@ class Trainer:
             except StopIteration:  # fixed val sampler is finite
                 break
             with self._autocast():
-                output = self.compiled_model(batch["board"], batch["rules"])
+                output = self._forward(batch)
                 head_losses = compute_head_losses(output, batch)
                 total = weighted_total_loss(head_losses, self.loss_weights)
             accumulator.add_batch(output, batch, head_losses, total)
@@ -358,17 +395,20 @@ class Trainer:
         append_metrics(self.metrics_path, row)
         return row
 
-    def _write_status(self, step: int, state: str) -> None:
+    def _write_status(self, step: int, state: str, error: str | None = None) -> None:
+        payload: dict[str, Any] = {
+            "state": state,
+            "step": step,
+            "total_steps": self.config.steps,
+            "compile": self.compile_status,
+            "device": str(self.device),
+            "updated": datetime.now().isoformat(timespec="seconds"),
+        }
+        if error is not None:
+            payload["error"] = error
         _atomic_write_json(
             self.run_dir / "status.json",
-            {
-                "state": state,
-                "step": step,
-                "total_steps": self.config.steps,
-                "compile": self.compile_status,
-                "device": str(self.device),
-                "updated": datetime.now().isoformat(timespec="seconds"),
-            },
+            payload,
         )
 
     def train(self) -> Path:
@@ -380,49 +420,57 @@ class Trainer:
         if self.start_step == 0 and not self.metrics_path.exists():
             write_metrics_header(self.metrics_path)
         writer = SummaryWriter(log_dir=str(self.run_dir / "tb"))
-        accumulator = MetricAccumulator(self.loss_weights)
-        iterator: Iterator[dict[str, torch.Tensor]] = iter(self.train_loader)
-
-        if self.start_step == 0:
-            self.save_checkpoint(0)
-            self._log_row(0, accumulator, writer, 0.0)
-
-        progress = tqdm(
-            range(self.start_step + 1, config.steps + 1),
-            initial=self.start_step,
-            total=config.steps,
-            disable=not config.progress,
-            unit="step",
-            dynamic_ncols=True,
-        )
-        window_start = time.monotonic()
-        window_samples = 0
+        progress = None
         last_step = self.start_step
-        for step in progress:
-            batch = batch_to_device(next(iterator), self.device)
-            output, head_losses, total = self.train_step(batch)
-            accumulator.add_batch(output, batch, head_losses, total)
-            window_samples += batch["board"].shape[0]
-            last_step = step
+        try:
+            accumulator = MetricAccumulator(self.loss_weights)
+            iterator: Iterator[dict[str, torch.Tensor]] = iter(self.train_loader)
 
-            if step % self.log_interval == 0 or step == config.steps:
-                elapsed = max(time.monotonic() - window_start, 1e-9)
-                row = self._log_row(step, accumulator, writer, window_samples / elapsed)
-                progress.set_postfix(
-                    loss=f"{float(row.get('train_loss', float('nan'))):.4f}",
-                    val=f"{float(row.get('val_loss', float('nan'))):.4f}",
-                )
-                accumulator = MetricAccumulator(self.loss_weights)
-                self._write_status(step, "running")
-                window_start = time.monotonic()
-                window_samples = 0
-            if step % config.checkpoint_interval == 0 and step != config.steps:
-                self.save_checkpoint(step)
+            if self.start_step == 0:
+                self.save_checkpoint(0)
+                self._log_row(0, accumulator, writer, 0.0)
 
-        final_path = self.save_checkpoint(last_step)
-        self._write_status(last_step, "finished")
-        writer.close()
-        return final_path
+            progress = tqdm(
+                range(self.start_step + 1, config.steps + 1),
+                initial=self.start_step,
+                total=config.steps,
+                disable=not config.progress,
+                unit="step",
+                dynamic_ncols=True,
+            )
+            window_start = time.monotonic()
+            window_samples = 0
+            for step in progress:
+                batch = batch_to_device(next(iterator), self.device)
+                output, head_losses, total = self.train_step(batch)
+                accumulator.add_batch(output, batch, head_losses, total)
+                window_samples += batch["board"].shape[0]
+                last_step = step
+
+                if step % self.log_interval == 0 or step == config.steps:
+                    elapsed = max(time.monotonic() - window_start, 1e-9)
+                    row = self._log_row(step, accumulator, writer, window_samples / elapsed)
+                    progress.set_postfix(
+                        loss=f"{float(row.get('train_loss', float('nan'))):.4f}",
+                        val=f"{float(row.get('val_loss', float('nan'))):.4f}",
+                    )
+                    accumulator = MetricAccumulator(self.loss_weights)
+                    self._write_status(step, "running")
+                    window_start = time.monotonic()
+                    window_samples = 0
+                if step % config.checkpoint_interval == 0 and step != config.steps:
+                    self.save_checkpoint(step)
+
+            final_path = self.save_checkpoint(last_step)
+            self._write_status(last_step, "finished")
+            return final_path
+        except Exception as error:
+            self._write_status(last_step, "failed", str(error))
+            raise
+        finally:
+            if progress is not None:
+                progress.close()
+            writer.close()
 
 
 def train_from_config(config: TrainConfig) -> Path:

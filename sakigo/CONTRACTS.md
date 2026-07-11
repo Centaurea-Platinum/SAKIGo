@@ -21,10 +21,12 @@ One JSON object per line. Fields (targets may nest under `targets`):
 | `ownership` | float[N²] ∈ [−1,1] | mover perspective (+1 = mine) |
 | `policy` | float[N²+1] | one-hot teacher top-1; **pass = last index** |
 | `budget` | float[N²+1] | full teacher policy renormalized over legal moves |
-| `legal_mask` | bool[N²+1] | pass last, always true |
+| `legal_mask` | bool[N²+1] | JSON booleans only; pass last and always true |
 | `source` | object | provenance, not consumed by training |
 
 Every target is optional per record; absent targets get mask=False in batches.
+`policy` is strictly one-hot and both action targets must assign zero mass to
+actions rejected by `legal_mask`.
 
 ## 2. Board planes (index order)
 
@@ -65,17 +67,23 @@ ownership: BCE-with-logits on (t+1)/2. Total = Σ weight_h · loss_h.
 
 ## 6. Train/val split
 
-Deterministic hash split by position: blake2b over
-`(seed, board_size, ruleset_key, position_key)` — byte-compatible with
-`Training/data.py::split_for_position`. Never change the key material.
+Prepared-data format v2 splits on a canonical identity of the exact model
+input: the little-endian float32 bytes of `board_planes` followed by
+`rule_features`, then blake2b over `(seed, board_size, ruleset_key,
+canonical_input_key)`. `position_key` remains move-path provenance only. This
+keeps transposed move sequences that reach the same model-visible position in
+the same split.
 
 ## 7. Checkpoint payload (rebuilt trainer)
 
 `torch.save` dict, loadable with `weights_only=True`:
 `model_state`, `optimizer_state`, `scheduler_state`, `step`,
 `model_config` (plain dict), `run_config` (plain dict),
-`rng` (python/torch/cuda states), `schema_version`.
+`rng` (python/torch/cuda states), `sampler_state`,
+`augmentation_state`, `sampler_state_exact`, `schema_version` (=3).
 Written atomically (tmp + rename) as `checkpoints/step_%06d.pt`.
+Exact batch-order resume requires checkpoints produced with `num_workers=0`;
+the trainer rejects non-exact prefetched sampler states.
 
 ## 8. Run directory layout
 

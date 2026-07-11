@@ -18,7 +18,14 @@ def _strip_jsonl_suffix(path: Path) -> str:
 
 
 class GenerationOutputWriter:
-    def __init__(self, output: Path, *, samples_per_file: int, zstd_level: int) -> None:
+    def __init__(
+        self,
+        output: Path,
+        *,
+        samples_per_file: int,
+        zstd_level: int,
+        overwrite: bool = False,
+    ) -> None:
         if samples_per_file < 0:
             raise ValueError("--samples-per-file must be non-negative")
         if zstd_level < 1 or zstd_level > 22:
@@ -28,6 +35,8 @@ class GenerationOutputWriter:
         self.zstd_level = zstd_level
         self.paths: list[Path] = []
         self._handle: Any = None
+        self._temporary_path: Path | None = None
+        self._final_path: Path | None = None
         self._shard_index = 0
         self._samples_in_file = 0
         self._single_file = samples_per_file == 0
@@ -42,6 +51,22 @@ class GenerationOutputWriter:
             self.directory = output
             self.prefix = "samples"
         self.directory.mkdir(parents=True, exist_ok=True)
+        existing = self._existing_paths()
+        if existing and not overwrite:
+            joined = ", ".join(str(path) for path in existing[:3])
+            raise FileExistsError(
+                f"generation output already exists ({joined}); use --overwrite-output to replace it"
+            )
+        for path in existing:
+            path.unlink()
+
+    def _existing_paths(self) -> list[Path]:
+        if self._single_file:
+            temporary = self.output.with_name(f".{self.output.name}.tmp.jsonl.zst")
+            return [path for path in (self.output, temporary) if path.exists()]
+        completed = sorted(self.directory.glob(f"{self.prefix}_*.jsonl.zst"))
+        temporary = sorted(self.directory.glob(f".{self.prefix}_*.tmp.jsonl.zst"))
+        return completed + temporary
 
     @property
     def data_format(self) -> str:
@@ -57,7 +82,7 @@ class GenerationOutputWriter:
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()
+        self.close(commit=exc_type is None)
 
     def write_record(self, record: dict[str, Any]) -> None:
         if self._handle is None or (
@@ -71,10 +96,15 @@ class GenerationOutputWriter:
         if self._handle is not None:
             self._handle.flush()
 
-    def close(self) -> None:
+    def close(self, *, commit: bool = True) -> None:
         if self._handle is not None:
             self._handle.close()
             self._handle = None
+        if self._temporary_path is not None and self._final_path is not None:
+            if commit:
+                self._temporary_path.replace(self._final_path)
+            self._temporary_path = None
+            self._final_path = None
 
     def _rotate(self) -> None:
         self.close()
@@ -85,4 +115,7 @@ class GenerationOutputWriter:
             self._shard_index += 1
         self.paths.append(path)
         self._samples_in_file = 0
-        self._handle = open_jsonl_writer(path, compression_level=self.zstd_level)
+        temporary = path.with_name(f".{path.name}.tmp.jsonl.zst")
+        self._final_path = path
+        self._temporary_path = temporary
+        self._handle = open_jsonl_writer(temporary, compression_level=self.zstd_level)

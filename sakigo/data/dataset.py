@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler, get_worker_info
 
-from sakigo.data.prepare import load_manifest
+from sakigo.data.prepare import PREPARE_FORMAT_VERSION, load_manifest
 from sakigo.data.records import _d4_transform_planes
 
 _ARRAY_NAMES = (
@@ -69,6 +69,11 @@ class PreparedDataset(Dataset[dict[str, np.ndarray]]):
 
     def __init__(self, prepared_dir: Path, split: str, augment_d4: bool = False) -> None:
         manifest = load_manifest(prepared_dir)
+        if manifest.get("prepare_format_version") != PREPARE_FORMAT_VERSION:
+            raise ValueError(
+                f"prepared data uses format {manifest.get('prepare_format_version')!r}; "
+                f"rebuild it with format {PREPARE_FORMAT_VERSION}"
+            )
         self.split = split
         self.augment_d4 = augment_d4
         self.ruleset_keys: list[str] = list(manifest["ruleset_keys"])
@@ -117,6 +122,21 @@ class PreparedDataset(Dataset[dict[str, np.ndarray]]):
             seed = torch.initial_seed() if worker is None else worker.seed
             self._rng = random.Random(seed & 0xFFFF_FFFF_FFFF_FFFF)
         return self._rng
+
+    def augmentation_state_dict(self) -> dict[str, object] | None:
+        if self._rng is None:
+            return None
+        return {"rng": self._rng.getstate()}
+
+    def load_augmentation_state_dict(self, state: Mapping[str, object] | None) -> None:
+        if state is None:
+            self._rng = None
+            return
+        rng_state = state.get("rng")
+        if not isinstance(rng_state, (tuple, list)) or len(rng_state) != 3:
+            raise ValueError("invalid augmentation RNG state")
+        self._rng = random.Random()
+        self._rng.setstate((int(rng_state[0]), tuple(rng_state[1]), rng_state[2]))
 
     def __getitem__(self, index: int) -> dict[str, np.ndarray]:
         group, row = self.group_of(index)
@@ -217,6 +237,40 @@ class RulesetBalancedBatchSampler(Sampler[list[int]]):
             self._rng.shuffle(queue)
             self._queues[key] = queue
         return queue.pop()
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "rng": self._rng.getstate(),
+            "queues": [
+                {"key": [size, code], "values": list(values)}
+                for (size, code), values in sorted(self._queues.items())
+            ],
+        }
+
+    def load_state_dict(self, state: Mapping[str, object]) -> None:
+        rng_state = state.get("rng")
+        if not isinstance(rng_state, (tuple, list)) or len(rng_state) != 3:
+            raise ValueError("invalid sampler RNG state")
+        self._rng.setstate((int(rng_state[0]), tuple(rng_state[1]), rng_state[2]))
+        queues: dict[tuple[int, int], list[int]] = {}
+        raw_queues = state.get("queues", [])
+        if not isinstance(raw_queues, list):
+            raise ValueError("invalid sampler queue state")
+        for item in raw_queues:
+            if not isinstance(item, Mapping):
+                raise ValueError("invalid sampler queue entry")
+            raw_key = item.get("key")
+            raw_values = item.get("values")
+            if not isinstance(raw_key, (tuple, list)) or len(raw_key) != 2:
+                raise ValueError("invalid sampler queue key")
+            key = (int(raw_key[0]), int(raw_key[1]))
+            if key not in self._pools or not isinstance(raw_values, (tuple, list)):
+                raise ValueError(f"sampler state does not match prepared data for {key}")
+            values = [int(value) for value in raw_values]
+            if len(values) != len(set(values)) or not set(values).issubset(set(self._pools[key])):
+                raise ValueError(f"sampler queue contains an unknown index for {key}")
+            queues[key] = values
+        self._queues = queues
 
     def _next_batch(self) -> list[int]:
         size = self._rng.choices(self._sizes, weights=self._weights, k=1)[0]

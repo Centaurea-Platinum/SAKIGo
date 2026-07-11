@@ -159,10 +159,14 @@ def test_trainer_smoke_run(workspace: dict[str, Path], spec_patch) -> None:
 
 
 def test_resume_is_deterministic(workspace: dict[str, Path], spec_patch) -> None:
-    full = Trainer(_config(workspace, "run_full", steps=16, checkpoint_interval=8))
+    full = Trainer(
+        _config(workspace, "run_full", steps=16, checkpoint_interval=8, augment_d4=True)
+    )
     final_full = full.train()
 
-    part = Trainer(_config(workspace, "run_part", steps=16, checkpoint_interval=8))
+    part = Trainer(
+        _config(workspace, "run_part", steps=16, checkpoint_interval=8, augment_d4=True)
+    )
     part.train()
     midpoint = Path(part.run_dir) / "checkpoints" / "step_000008.pt"
     assert midpoint.exists()
@@ -172,6 +176,7 @@ def test_resume_is_deterministic(workspace: dict[str, Path], spec_patch) -> None
             "run_part",
             steps=16,
             checkpoint_interval=8,
+            augment_d4=True,
             resume=str(midpoint),
         )
     )
@@ -180,9 +185,8 @@ def test_resume_is_deterministic(workspace: dict[str, Path], spec_patch) -> None
     full_state = torch.load(final_full, map_location="cpu", weights_only=True)["model_state"]
     resumed_state = torch.load(final_resumed, map_location="cpu", weights_only=True)["model_state"]
     for key, value in full_state.items():
-        assert value.shape == resumed_state[key].shape, key
-    # Data order after resume differs (sampler state is not checkpointed), so
-    # exact equality is not required — but the resumed run must train stably.
+        torch.testing.assert_close(value, resumed_state[key], rtol=0.0, atol=0.0, msg=key)
+    # Sampler and RNG state are checkpointed, so resumed weights are bit-exact.
     status = json.loads((Path(resumed.run_dir) / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "finished" and status["step"] == 16
 
@@ -256,6 +260,42 @@ def test_default_metrics_rows_follow_checkpoint_cadence(
     header = lines[0].split(",")
     rows = [dict(zip(header, line.split(","))) for line in lines[1:]]
     assert [int(row["step"]) for row in rows] == [0, 5, 10]
+
+
+def test_lazy_compile_failure_falls_back_to_eager(workspace: dict[str, Path], spec_patch) -> None:
+    trainer = Trainer(_config(workspace, "run_compile_fallback", steps=1))
+
+    class FailingCompiled(torch.nn.Module):
+        def forward(self, board: torch.Tensor, rules: torch.Tensor):
+            raise RuntimeError("backend failed lazily")
+
+    trainer.compiled_model = FailingCompiled()
+    batch = next(iter(trainer.train_loader))
+    output = trainer._forward(batch)
+    assert trainer.compiled_model is trainer.model
+    assert trainer.compile_status.startswith("runtime-failed:")
+    assert output["policy_logits"].shape[0] == trainer.config.batch_size
+
+
+def test_invalid_cadence_fails_before_setup(workspace: dict[str, Path], spec_patch) -> None:
+    with pytest.raises(ValueError, match="checkpoint_interval"):
+        Trainer(_config(workspace, "run_invalid", checkpoint_interval=0))
+
+
+def test_training_failure_records_status(
+    workspace: dict[str, Path], spec_patch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trainer = Trainer(_config(workspace, "run_failure", steps=1, checkpoint_interval=1))
+
+    def fail(_batch):
+        raise RuntimeError("deliberate failure")
+
+    monkeypatch.setattr(trainer, "train_step", fail)
+    with pytest.raises(RuntimeError, match="deliberate failure"):
+        trainer.train()
+    status = json.loads((trainer.run_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "failed"
+    assert status["error"] == "deliberate failure"
 
 
 def test_suite_layout_uses_structured_train_dirs(

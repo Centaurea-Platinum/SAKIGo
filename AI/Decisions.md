@@ -2,6 +2,10 @@
 
 The *why* behind design choices, so later sessions don't relitigate settled ground or lose the reasoning. Newest first. Entries are living until built, then they freeze.
 
+## D27 - Phase-1 boundaries fail closed and resume exactly (2026-07-11)
+
+Generation now forces KataGo analysis values to Black perspective, owns and reaps the subprocess across every exit path, records failed status, times out stalled responses, and refuses to reuse output shards unless overwrite is explicit. Schema-v1 loading is strict about ruleset/version, boolean legality, pass legality, one-hot policy, and zero illegal target mass. Prepared-data format v2 splits on canonical model-visible input bytes and writes each rebuild into an immutable generation directory before atomically switching the manifest. Checkpoint schema v3 captures sampler and augmentation state; exact resume uses `num_workers=0`, and non-exact prefetched states are rejected. Evaluation safe-loads checkpoints by default, represents draws and capped games honestly, uses paired uncertainty for paired self-play, and rejects Ancient Chinese scoring until canonical engine scoring exists. `StateHash` now includes exact komi bits and a digest of superko history. **Why:** experiment conclusions are only as trustworthy as their data, split, resume, and adjudication boundaries; silent fallback or approximation is worse than a loud refusal. Source: architecture/implementation review and hardening implementation on 2026-07-11.
+
 ## D26 - Rule MLP directly initializes registers (2026-07-07)
 
 `SakiGoNet` no longer has a separate learned `register_seed`. Initial registers are now just `reshape(rule_mlp(rules))` expanded across the D4 group axis. **Why:** the final bias of `rule_mlp` can already learn a rule-independent default register state, so `register_seed + rule_mlp(rules)` was redundant while making the architecture harder to reason about. Old checkpoint states that still contain `register_seed` are tolerated by dropping that obsolete key during load. Source: user discussion and implementation on 2026-07-07.
