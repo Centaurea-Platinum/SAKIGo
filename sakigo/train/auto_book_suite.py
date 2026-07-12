@@ -21,7 +21,12 @@ def _write_status(path: Path, **values: object) -> None:
     temporary.replace(path)
 
 
-def run(generation_run: Path, suite_run: Path, poll_seconds: float = 30.0) -> None:
+def run(
+    generation_run: Path,
+    suite_run: Path,
+    poll_seconds: float = 30.0,
+    prepared_dir: Path | None = None,
+) -> None:
     launcher_status = suite_run / "launcher_status.json"
     dataset_manifest = generation_run / "dataset_manifest.json"
     index_report = generation_run / "book_index_report.json"
@@ -69,6 +74,8 @@ def run(generation_run: Path, suite_run: Path, poll_seconds: float = 30.0) -> No
         validation_data=str(validation_dir.resolve()),
         specs=list(DEFAULT_SPECS),
         epochs=1,
+        score_weight=81.0,
+        prepared_dir=str(prepared_dir.resolve()) if prepared_dir else None,
     )
     try:
         summary = run_suite(
@@ -76,6 +83,7 @@ def run(generation_run: Path, suite_run: Path, poll_seconds: float = 30.0) -> No
                 root=suite_run,
                 data=(train_dir,),
                 validation_data=(validation_dir,),
+                prepared_dir=prepared_dir,
                 specs=DEFAULT_SPECS,
                 seed=20260713,
                 batch_size=0,
@@ -88,6 +96,7 @@ def run(generation_run: Path, suite_run: Path, poll_seconds: float = 30.0) -> No
                 amp="auto",
                 device="cuda",
                 augment_d4=False,
+                score_weight=81.0,
                 progress=False,
             )
         )
@@ -106,8 +115,9 @@ def main() -> None:
     parser.add_argument("--generation-run", type=Path, required=True)
     parser.add_argument("--suite-run", type=Path, required=True)
     parser.add_argument("--poll-seconds", type=float, default=30.0)
+    parser.add_argument("--prepared-dir", type=Path, default=None)
     args = parser.parse_args()
-    run(args.generation_run, args.suite_run, args.poll_seconds)
+    run(args.generation_run, args.suite_run, args.poll_seconds, args.prepared_dir)
 
 
 if __name__ == "__main__":

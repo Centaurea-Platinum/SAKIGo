@@ -78,6 +78,10 @@ class SuiteConfig:
     lr: float = 3e-4
     weight_decay: float = 0.01
     warmup_steps: int = 100
+    wdl_weight: float = 1.0
+    score_weight: float = 1.0
+    policy_weight: float = 1.0
+    budget_weight: float = 1.0
 
 
 def _now_iso() -> str:
@@ -196,6 +200,12 @@ def _status_payload(
             max(1, math.ceil(steps / 8)) if steps else 0
         ),
         "metrics_policy": "step_000000 and checkpoint multiples; final step also logged",
+        "loss_weights": {
+            "wdl": config.wdl_weight,
+            "score": config.score_weight,
+            "policy": config.policy_weight,
+            "budget": config.budget_weight,
+        },
         "log_interval": 0,
         "seed": config.seed,
         "val_fraction": config.val_fraction,
@@ -364,6 +374,10 @@ def train_config_for_spec(
         lr=config.lr,
         weight_decay=config.weight_decay,
         warmup_steps=config.warmup_steps,
+        wdl_weight=config.wdl_weight,
+        score_weight=config.score_weight,
+        policy_weight=config.policy_weight,
+        budget_weight=config.budget_weight,
         amp=config.amp,
         compile=config.model_compile,
         run_dir=str(paths.train_run_dir(spec)),
@@ -531,6 +545,10 @@ def parse_args(argv: list[str] | None = None) -> SuiteConfig:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-steps", type=int, default=100)
+    parser.add_argument("--wdl-weight", type=float, default=1.0)
+    parser.add_argument("--score-weight", type=float, default=1.0)
+    parser.add_argument("--policy-weight", type=float, default=1.0)
+    parser.add_argument("--budget-weight", type=float, default=1.0)
     args = parser.parse_args(argv)
 
     run_dir = args.run_dir or Path("runs") / f"phase1_suite_{datetime.now():%Y%m%d_%H%M%S}"
@@ -559,6 +577,10 @@ def parse_args(argv: list[str] | None = None) -> SuiteConfig:
         lr=args.lr,
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
+        wdl_weight=args.wdl_weight,
+        score_weight=args.score_weight,
+        policy_weight=args.policy_weight,
+        budget_weight=args.budget_weight,
     )
 
 

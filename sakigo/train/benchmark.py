@@ -59,6 +59,11 @@ def benchmark_batch_size(
     model = None
     optimizer = None
     try:
+        if compile_mode != "off":
+            # Each model shape and batch size guards the same forward code object.
+            # Isolate candidates so Dynamo's recompile limit cannot turn later
+            # measurements into accidental eager-mode benchmarks.
+            torch._dynamo.reset()
         config = config_from_spec(spec, board_size=max(board_size, config_from_spec(spec).board_size))
         model = SakiGoNet(config).to(device)
         if compile_mode != "off":
@@ -108,6 +113,8 @@ def benchmark_batch_size(
     finally:
         del model, optimizer
         gc.collect()
+        if compile_mode != "off":
+            torch._dynamo.reset()
         if device.type == "cuda":
             torch.cuda.empty_cache()
 

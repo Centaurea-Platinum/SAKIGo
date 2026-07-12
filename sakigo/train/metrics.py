@@ -47,6 +47,7 @@ def metric_fields() -> list[str]:
             fields.append(f"{prefix}_{head}_illegal_mass")
             fields.append(f"{prefix}_{head}_illegal_target_count")
         fields.append(f"{prefix}_score_mae")
+        fields.append(f"{prefix}_score_point_mae")
     fields.extend(confusion_fields())
     return fields
 
@@ -160,6 +161,8 @@ class MetricAccumulator:
         mask = batch["score_mask"].float()
         error = (output["score"].detach().reshape_as(batch["score_target"]) - batch["score_target"]).abs()
         self._sum("score_abs", (error.squeeze(1) * mask).sum())
+        board_area = int(batch["board"].shape[-2] * batch["board"].shape[-1])
+        self._sum("score_point_abs", (error.squeeze(1) * mask).sum() * board_area)
         self._sum("score_total", mask.sum())
 
     def averages(self) -> dict[str, float]:
@@ -184,6 +187,9 @@ class MetricAccumulator:
             out[f"{head}_illegal_target_count"] = illegal_count
         score_total = sums.get("score_total", 0.0)
         out["score_mae"] = sums.get("score_abs", 0.0) / score_total if score_total else _nan()
+        out["score_point_mae"] = (
+            sums.get("score_point_abs", 0.0) / score_total if score_total else _nan()
+        )
         return out
 
 

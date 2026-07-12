@@ -110,6 +110,7 @@ def _config(workspace: dict[str, Path], run_name: str, **overrides) -> TrainConf
         val_batches=4,
         progress=False,
         warmup_steps=4,
+        score_weight=81.0,
     )
     base.update(overrides)
     return TrainConfig(**base)
@@ -279,6 +280,7 @@ def test_suite_layout_uses_structured_train_dirs(
         amp="off",
         device="cpu",
         progress=False,
+        score_weight=81.0,
     )
     paths = build_suite_paths(config)
     train_config = train_config_for_spec(
@@ -300,3 +302,4 @@ def test_suite_layout_uses_structured_train_dirs(
     assert train_config.run_dir == str(config.root / "train" / "tiny")
     assert train_config.log_interval == 0
     assert train_config.checkpoint_interval == 5
+    assert train_config.score_weight == 81.0
