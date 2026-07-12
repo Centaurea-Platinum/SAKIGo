@@ -56,6 +56,7 @@ class SuitePaths:
 class SuiteConfig:
     root: Path
     data: tuple[Path, ...] = ()
+    validation_data: tuple[Path, ...] = ()
     prepared_dir: Path | None = None
     specs: tuple[str, ...] = DEFAULT_SPECS
     seed: int = 0
@@ -63,12 +64,11 @@ class SuiteConfig:
     batch_size: int = 0
     steps: int = 0
     num_workers: int = 0
-    benchmark_spec: str = ""
     benchmark_batch_sizes: tuple[int, ...] = DEFAULT_BENCHMARK_BATCH_SIZES
     benchmark_timed_steps: int = 8
     benchmark_budget_fraction: float = 0.85
-    checkpoint_interval: int = 1024
-    val_batches: int = 64
+    checkpoint_interval: int = 0  # 0 = eight checkpoints/evaluations per epoch
+    val_batches: int = 0  # 0 = cover the complete explicit validation split
     val_fixed: bool = True
     model_compile: str = "reduce-overhead"
     amp: str = "auto"
@@ -178,6 +178,7 @@ def _status_payload(
         "root": str(paths.root),
         "data_dir": str(paths.data),
         "data_sources": [str(path) for path in data_sources],
+        "validation_sources": [str(path) for path in config.validation_data],
         "prepared_dir": str(paths.prepared),
         "generation_dir": str(paths.generation),
         "train_dir": str(paths.train),
@@ -185,8 +186,15 @@ def _status_payload(
         "sweeps_dir": str(paths.sweeps),
         "scripts_dir": str(paths.scripts),
         "train_specs": list(config.specs),
-        "validation": {"fixed": config.val_fixed, "batches": config.val_batches},
-        "checkpoint_interval": config.checkpoint_interval,
+        "validation": {
+            "fixed": config.val_fixed,
+            "batches": config.val_batches or (
+                math.ceil(val_records / batch_size) if val_records and batch_size else 0
+            ),
+        },
+        "checkpoint_interval": config.checkpoint_interval or (
+            max(1, math.ceil(steps / 8)) if steps else 0
+        ),
         "metrics_policy": "step_000000 and checkpoint multiples; final step also logged",
         "log_interval": 0,
         "seed": config.seed,
@@ -195,7 +203,7 @@ def _status_payload(
         "train_steps": steps,
         "train_records": train_records,
         "val_records": val_records,
-        "benchmark_spec": config.benchmark_spec or (config.specs[-1] if config.specs else ""),
+        "benchmark_specs": list(config.specs),
         "benchmark_batch_sizes": list(config.benchmark_batch_sizes),
         "benchmark_results": benchmark_results or [],
         "final_checkpoints": final_checkpoints or {},
@@ -224,6 +232,7 @@ def prepare_suite_data(
             paths.prepared,
             seed=config.seed,
             val_fraction=config.val_fraction,
+            validation_data=list(config.validation_data),
         )
         return manifest, data_sources
     manifest_path = paths.prepared / "manifest.json"
@@ -243,7 +252,6 @@ def choose_batch_size(
     if not config.specs:
         raise ValueError("suite needs at least one model spec")
 
-    spec = config.benchmark_spec or config.specs[-1]
     device = resolve_device(config.device)
     torch.manual_seed(config.seed)
     random.seed(config.seed)
@@ -258,38 +266,72 @@ def choose_batch_size(
     results: list[dict[str, Any]] = []
     best: tuple[int, float] | None = None
     for batch_size in config.benchmark_batch_sizes:
-        rate, peak, reason = benchmark_batch_size(
-            spec,
-            dataset,
-            batch_size,
-            device,
-            timed_steps=config.benchmark_timed_steps,
-            memory_budget=budget,
+        if len(dataset) % batch_size != 0:
+            results.append(
+                {
+                    "batch_size": batch_size,
+                    "geometric_mean_samples_per_second": None,
+                    "per_spec": [],
+                    "reason": "not_an_exact_epoch_divisor",
+                }
+            )
+            continue
+        per_spec: list[dict[str, Any]] = []
+        rates: list[float] = []
+        stop_larger = False
+        for spec in config.specs:
+            rate, peak, reason = benchmark_batch_size(
+                spec,
+                dataset,
+                batch_size,
+                device,
+                timed_steps=config.benchmark_timed_steps,
+                memory_budget=budget,
+                compile_mode=config.model_compile,
+            )
+            per_spec.append(
+                {
+                    "spec": spec,
+                    "samples_per_second": rate,
+                    "peak_bytes": peak,
+                    "reason": reason,
+                }
+            )
+            if rate is not None:
+                rates.append(rate)
+            if reason in {"over_budget", "oom"}:
+                stop_larger = True
+            if rate is None:
+                break
+        aggregate = (
+            math.exp(sum(math.log(rate) for rate in rates) / len(rates))
+            if len(rates) == len(config.specs)
+            else None
         )
         result = {
             "batch_size": batch_size,
-            "samples_per_second": rate,
-            "peak_bytes": peak,
-            "reason": reason,
+            "geometric_mean_samples_per_second": aggregate,
+            "per_spec": per_spec,
         }
         results.append(result)
-        if rate is not None and (best is None or rate > best[1]):
-            best = (batch_size, rate)
-        if reason in {"over_budget", "oom"}:
+        if aggregate is not None and (best is None or aggregate > best[1]):
+            best = (batch_size, aggregate)
+        if stop_larger:
             break
-    sweep_path = paths.sweeps / f"batch_size_{spec}.json"
+    sweep_path = paths.sweeps / "batch_size_all_models.json"
     _atomic_write_json(
         sweep_path,
         {
-            "spec": spec,
+            "specs": list(config.specs),
             "device": str(device),
+            "compile": config.model_compile,
             "budget_fraction": config.benchmark_budget_fraction,
             "results": results,
             "best_batch_size": best[0] if best else None,
         },
     )
     if best is None:
-        raise RuntimeError(f"batch-size benchmark found no usable batch for {spec}")
+        raise RuntimeError("batch-size benchmark found no candidate usable by every model")
     return best[0], results
 
 
@@ -301,9 +343,16 @@ def train_config_for_spec(
     data_sources: tuple[Path, ...],
     batch_size: int,
     steps: int,
+    checkpoint_interval: int | None = None,
+    val_batches: int | None = None,
 ) -> TrainConfig:
+    checkpoint_interval = (
+        config.checkpoint_interval if checkpoint_interval is None else checkpoint_interval
+    )
+    val_batches = config.val_batches if val_batches is None else val_batches
     return TrainConfig(
         data=tuple(str(path) for path in data_sources),
+        validation_data=tuple(str(path) for path in config.validation_data),
         prepared_dir=str(paths.prepared),
         seed=config.seed,
         val_fraction=config.val_fraction,
@@ -319,8 +368,8 @@ def train_config_for_spec(
         compile=config.model_compile,
         run_dir=str(paths.train_run_dir(spec)),
         log_interval=0,
-        checkpoint_interval=config.checkpoint_interval,
-        val_batches=config.val_batches,
+        checkpoint_interval=checkpoint_interval,
+        val_batches=val_batches,
         val_fixed=config.val_fixed,
         progress=config.progress,
         device=config.device,
@@ -330,8 +379,10 @@ def train_config_for_spec(
 def run_suite(config: SuiteConfig) -> dict[str, Any]:
     if not config.specs:
         raise ValueError("suite needs at least one model spec")
-    if config.checkpoint_interval <= 0:
-        raise ValueError("checkpoint_interval must be positive")
+    if config.checkpoint_interval < 0:
+        raise ValueError("checkpoint_interval must be non-negative")
+    if config.val_batches < 0:
+        raise ValueError("val_batches must be non-negative")
     if config.batch_size < 0:
         raise ValueError("batch_size must be non-negative")
     if config.steps < 0:
@@ -371,6 +422,10 @@ def run_suite(config: SuiteConfig) -> dict[str, Any]:
         )
         batch_size, benchmark_results = choose_batch_size(config, paths)
         steps = steps or math.ceil(train_records / batch_size)
+        checkpoint_interval = config.checkpoint_interval or max(1, math.ceil(steps / 8))
+        val_batches = config.val_batches or (
+            math.ceil(val_records / batch_size) if val_records else 0
+        )
 
         for spec in config.specs:
             write_status(
@@ -395,6 +450,8 @@ def run_suite(config: SuiteConfig) -> dict[str, Any]:
                     data_sources=data_sources,
                     batch_size=batch_size,
                     steps=steps,
+                    checkpoint_interval=checkpoint_interval,
+                    val_batches=val_batches,
                 )
             )
             final_checkpoints[spec] = str(trainer.train())
@@ -436,6 +493,7 @@ def parse_args(argv: list[str] | None = None) -> SuiteConfig:
     parser = argparse.ArgumentParser(prog="sakigo.train.suite")
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--data", nargs="*", type=Path, default=())
+    parser.add_argument("--validation-data", nargs="*", type=Path, default=())
     parser.add_argument("--prepared-dir", type=Path, default=None)
     parser.add_argument("--specs", default=",".join(DEFAULT_SPECS))
     parser.add_argument("--seed", type=int, default=0)
@@ -443,15 +501,14 @@ def parse_args(argv: list[str] | None = None) -> SuiteConfig:
     parser.add_argument("--batch-size", type=int, default=0)
     parser.add_argument("--steps", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--benchmark-spec", default="")
     parser.add_argument(
         "--benchmark-batch-sizes",
         default=",".join(str(size) for size in DEFAULT_BENCHMARK_BATCH_SIZES),
     )
     parser.add_argument("--benchmark-timed-steps", type=int, default=8)
     parser.add_argument("--benchmark-budget-fraction", type=float, default=0.85)
-    parser.add_argument("--checkpoint-interval", type=int, default=1024)
-    parser.add_argument("--val-batches", type=int, default=64)
+    parser.add_argument("--checkpoint-interval", type=int, default=0)
+    parser.add_argument("--val-batches", type=int, default=0)
     parser.add_argument(
         "--val-fixed",
         action=argparse.BooleanOptionalAction,
@@ -480,6 +537,7 @@ def parse_args(argv: list[str] | None = None) -> SuiteConfig:
     return SuiteConfig(
         root=run_dir,
         data=tuple(args.data),
+        validation_data=tuple(args.validation_data),
         prepared_dir=args.prepared_dir,
         specs=_parse_csv_strings(args.specs),
         seed=args.seed,
@@ -487,7 +545,6 @@ def parse_args(argv: list[str] | None = None) -> SuiteConfig:
         batch_size=args.batch_size,
         steps=args.steps,
         num_workers=args.num_workers,
-        benchmark_spec=args.benchmark_spec,
         benchmark_batch_sizes=_parse_csv_ints(args.benchmark_batch_sizes),
         benchmark_timed_steps=args.benchmark_timed_steps,
         benchmark_budget_fraction=args.benchmark_budget_fraction,

@@ -85,14 +85,14 @@ the same split.
 `model_state`, `optimizer_state`, `scheduler_state`, `step`,
 `model_config` (plain dict), `run_config` (plain dict),
 `rng` (python/torch/cuda states), `sampler_state`,
-`augmentation_state`, `sampler_state_exact`, `checkpoint_schema_version` (=6).
+`augmentation_state`, `sampler_state_exact`, `checkpoint_schema_version` (=7).
 Written atomically (tmp + rename) as `checkpoints/step_%06d.pt`.
 Exact batch-order resume requires checkpoints produced with `num_workers=0`;
 the trainer rejects non-exact prefetched sampler states.
 
-Schema 6 removes the ownership head from schema 5's scalar-stem,
-fused-projection model. Earlier model and optimizer states are intentionally
-rejected rather than partially migrated.
+Schema 7 retains schema 6's no-ownership model and restores exact sampler and
+augmentation state required for batch-identical resume. Earlier model and
+optimizer states are intentionally rejected rather than partially migrated.
 
 ## 8. Run directory layout
 

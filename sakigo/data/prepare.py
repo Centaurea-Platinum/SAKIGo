@@ -6,8 +6,8 @@ Layout under out_dir/:
   manifest.json
   generation_<id>/<split>_<N>/board_planes.npy, rule_features.npy, ply.npy, ruleset_code.npy,
               wdl.npy + wdl_mask.npy, score.npy + score_mask.npy,
-              ownership.npy + ownership_mask.npy, policy.npy + policy_mask.npy,
-              budget.npy + budget_mask.npy, legal_mask.npy + legal_available.npy
+              policy.npy + policy_mask.npy, budget.npy + budget_mask.npy,
+              legal_mask.npy + legal_available.npy
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 from uuid import uuid4
 
 import numpy as np
@@ -23,13 +24,14 @@ from sakigo.constants import SCHEMA_VERSION, WDL_LABELS
 from sakigo.data.records import (
     TRAIN_SPLIT,
     VAL_SPLIT,
+    TrainingRecord,
     expand_data_paths,
     iter_records,
     split_for_record,
 )
 
 MANIFEST_NAME = "manifest.json"
-PREPARE_FORMAT_VERSION = 2
+PREPARE_FORMAT_VERSION = 3
 PREPARED_ARRAY_NAMES = (
     "board_planes",
     "rule_features",
@@ -39,8 +41,6 @@ PREPARED_ARRAY_NAMES = (
     "wdl_mask",
     "score",
     "score_mask",
-    "ownership",
-    "ownership_mask",
     "policy",
     "policy_mask",
     "budget",
@@ -58,11 +58,36 @@ class GroupInfo:
     directory: str
 
 
-def _source_fingerprint(paths: list[Path]) -> list[dict[str, object]]:
+def _source_fingerprint(
+    train_paths: list[Path], validation_paths: list[Path]
+) -> list[dict[str, object]]:
     return [
-        {"path": str(path), "size": path.stat().st_size, "mtime_ns": path.stat().st_mtime_ns}
+        {
+            "role": role,
+            "path": str(path),
+            "size": path.stat().st_size,
+            "mtime_ns": path.stat().st_mtime_ns,
+        }
+        for role, paths in (("train", train_paths), ("validation", validation_paths))
         for path in paths
     ]
+
+
+def _labeled_records(
+    train_paths: list[Path],
+    validation_paths: list[Path],
+    *,
+    seed: int,
+    val_fraction: float,
+) -> Iterator[tuple[str, TrainingRecord]]:
+    if validation_paths:
+        for record in iter_records(train_paths):
+            yield TRAIN_SPLIT, record
+        for record in iter_records(validation_paths):
+            yield VAL_SPLIT, record
+        return
+    for record in iter_records(train_paths):
+        yield split_for_record(record, val_fraction, seed), record
 
 
 def _group_dir(
@@ -84,7 +109,9 @@ def manifest_is_current(
     data_paths: list[Path],
     seed: int,
     val_fraction: float,
+    validation_paths: list[Path] | None = None,
 ) -> bool:
+    validation_paths = validation_paths or []
     manifest_path = out_dir / MANIFEST_NAME
     if not manifest_path.exists():
         return False
@@ -97,7 +124,8 @@ def manifest_is_current(
         and manifest.get("schema_version") == SCHEMA_VERSION
         and manifest.get("seed") == seed
         and manifest.get("val_fraction") == val_fraction
-        and manifest.get("sources") == _source_fingerprint(data_paths)
+        and manifest.get("sources")
+        == _source_fingerprint(data_paths, validation_paths)
     )
     if not metadata_matches:
         return False
@@ -119,12 +147,20 @@ def prepare_tensor_shards(
     *,
     seed: int,
     val_fraction: float,
+    validation_data: list[Path | str] | None = None,
     force: bool = False,
 ) -> dict[str, object]:
     """Convert JSONL sources into tensor shards; skips work when up to date."""
     data_paths = expand_data_paths(Path(item) for item in data)
+    validation_paths = (
+        expand_data_paths(Path(item) for item in validation_data)
+        if validation_data
+        else []
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
-    if not force and manifest_is_current(out_dir, data_paths, seed, val_fraction):
+    if not force and manifest_is_current(
+        out_dir, data_paths, seed, val_fraction, validation_paths
+    ):
         return load_manifest(out_dir)
     generation = f"generation_{uuid4().hex}"
 
@@ -132,8 +168,9 @@ def prepare_tensor_shards(
     counts: dict[tuple[str, int], int] = {}
     ruleset_keys: list[str] = []
     ruleset_index: dict[str, int] = {}
-    for record in iter_records(data_paths):
-        split = split_for_record(record, val_fraction, seed)
+    for split, record in _labeled_records(
+        data_paths, validation_paths, seed=seed, val_fraction=val_fraction
+    ):
         counts[(split, record.board_size)] = counts.get((split, record.board_size), 0) + 1
         if record.ruleset_key not in ruleset_index:
             ruleset_index[record.ruleset_key] = len(ruleset_keys)
@@ -164,8 +201,6 @@ def prepare_tensor_shards(
             "wdl_mask": memmap("wdl_mask", "bool", (count,)),
             "score": memmap("score", "float32", (count,)),
             "score_mask": memmap("score_mask", "bool", (count,)),
-            "ownership": memmap("ownership", "float32", (count, area)),
-            "ownership_mask": memmap("ownership_mask", "bool", (count,)),
             "policy": memmap("policy", "float32", (count, action)),
             "policy_mask": memmap("policy_mask", "bool", (count,)),
             "budget": memmap("budget", "float32", (count, action)),
@@ -175,8 +210,9 @@ def prepare_tensor_shards(
         }
         cursors[(split, board_size)] = 0
 
-    for record in iter_records(data_paths):
-        split = split_for_record(record, val_fraction, seed)
+    for split, record in _labeled_records(
+        data_paths, validation_paths, seed=seed, val_fraction=val_fraction
+    ):
         key = (split, record.board_size)
         row = cursors[key]
         cursors[key] = row + 1
@@ -191,9 +227,6 @@ def prepare_tensor_shards(
         if record.score is not None:
             arrays["score"][row] = record.score
             arrays["score_mask"][row] = True
-        if record.ownership is not None:
-            arrays["ownership"][row] = record.ownership
-            arrays["ownership_mask"][row] = True
         if record.policy is not None:
             arrays["policy"][row] = record.policy
             arrays["policy_mask"][row] = True
@@ -218,7 +251,8 @@ def prepare_tensor_shards(
         "schema_version": SCHEMA_VERSION,
         "seed": seed,
         "val_fraction": val_fraction,
-        "sources": _source_fingerprint(data_paths),
+        "sources": _source_fingerprint(data_paths, validation_paths),
+        "split_mode": "explicit" if validation_paths else "hash",
         "ruleset_keys": ruleset_keys,
         "generation": generation,
         "groups": [

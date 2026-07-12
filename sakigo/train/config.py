@@ -16,6 +16,7 @@ from typing import Any
 class TrainConfig:
     # data
     data: tuple[str, ...] = ()
+    validation_data: tuple[str, ...] = ()
     prepared_dir: str = ""
     seed: int = 0
     val_fraction: float = 0.05
@@ -60,7 +61,7 @@ def config_from_dict(raw: dict[str, Any]) -> TrainConfig:
     for key, value in raw.items():
         if key not in known:
             raise ValueError(f"unknown train config key {key!r}")
-        if key == "data" and isinstance(value, list):
+        if key in {"data", "validation_data"} and isinstance(value, list):
             value = tuple(value)
         if key == "board_weights" and isinstance(value, dict):
             value = {int(k): float(v) for k, v in value.items()}
@@ -78,6 +79,12 @@ def parse_args(argv: list[str] | None = None) -> TrainConfig:
     parser = argparse.ArgumentParser(prog="sakigo.train")
     parser.add_argument("--config", type=Path, default=None, help="TOML run config")
     parser.add_argument("--data", nargs="*", default=None, help="JSONL(.zst) sources")
+    parser.add_argument(
+        "--validation-data",
+        nargs="*",
+        default=None,
+        help="Explicit validation JSONL(.zst) sources; disables hash re-splitting.",
+    )
     parser.add_argument("--prepared-dir", default=None)
     parser.add_argument("--model-spec", default=None)
     parser.add_argument("--steps", type=int, default=None)
@@ -103,6 +110,7 @@ def parse_args(argv: list[str] | None = None) -> TrainConfig:
     overrides: dict[str, Any] = {}
     for key in (
         "data",
+        "validation_data",
         "prepared_dir",
         "model_spec",
         "steps",
@@ -124,7 +132,7 @@ def parse_args(argv: list[str] | None = None) -> TrainConfig:
     ):
         value = getattr(namespace, key)
         if value is not None:
-            overrides[key] = tuple(value) if key == "data" else value
+            overrides[key] = tuple(value) if key in {"data", "validation_data"} else value
     if namespace.no_progress:
         overrides["progress"] = False
     return replace(config, **overrides)

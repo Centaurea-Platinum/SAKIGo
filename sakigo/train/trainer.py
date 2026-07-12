@@ -132,6 +132,8 @@ class Trainer:
         self.optimizer = self._make_optimizer()
         self.scheduler = make_scheduler(self.optimizer, config)
         self.start_step = 0
+        self._pending_sampler_state: dict[str, Any] | None = None
+        self._pending_augmentation_state: dict[str, Any] | None = None
         if config.resume:
             self._resume(Path(config.resume))
         self.compiled_model = self._compile_model()
@@ -179,6 +181,7 @@ class Trainer:
                     prepared_dir,
                     seed=config.seed,
                     val_fraction=config.val_fraction,
+                    validation_data=list(config.validation_data),
                 )
         elif config.data:
             prepared_dir = self.run_dir / "prepared"
@@ -187,6 +190,7 @@ class Trainer:
                 prepared_dir,
                 seed=config.seed,
                 val_fraction=config.val_fraction,
+                validation_data=list(config.validation_data),
             )
         else:
             raise ValueError("train config needs data sources or a prepared_dir")
@@ -207,6 +211,12 @@ class Trainer:
             pin_memory=pin,
             seed=config.seed,
             persistent_workers=True,
+        )
+        self.train_sampler = train_sampler
+        if self._pending_sampler_state is not None:
+            self.train_sampler.load_state_dict(self._pending_sampler_state)
+        self.train_dataset.load_augmentation_state_dict(
+            self._pending_augmentation_state
         )
         try:
             self.val_dataset: PreparedDataset | None = PreparedDataset(prepared_dir, "val")
@@ -254,6 +264,9 @@ class Trainer:
         }
         if self.scheduler is not None:
             payload["scheduler_state"] = self.scheduler.state_dict()
+        payload["sampler_state"] = self.train_sampler.state_dict()
+        payload["augmentation_state"] = self.train_dataset.augmentation_state_dict()
+        payload["sampler_state_exact"] = self.config.num_workers == 0
         return payload
 
     def save_checkpoint(self, step: int) -> Path:
@@ -271,6 +284,10 @@ class Trainer:
             raise ValueError(
                 f"checkpoint schema {version!r} is incompatible; expected "
                 f"{CHECKPOINT_SCHEMA_VERSION} for the book-only no-ownership model"
+            )
+        if not payload.get("sampler_state_exact", False):
+            raise ValueError(
+                "checkpoint sampler state is not exact; resume requires num_workers=0"
             )
         model_config = model_config_from_dict(payload["model_config"])
         if asdict(model_config) != asdict(self.model_config):
@@ -294,6 +311,8 @@ class Trainer:
         if rng.get("cuda") is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state_all([state.cpu().to(torch.uint8) for state in rng["cuda"]])
         self.start_step = int(payload["step"])
+        self._pending_sampler_state = payload.get("sampler_state")
+        self._pending_augmentation_state = payload.get("augmentation_state")
 
     # -- steps ---------------------------------------------------------------
 

@@ -156,7 +156,7 @@ def test_trainer_smoke_run(workspace: dict[str, Path], spec_patch) -> None:
 
     # weights_only load must succeed (checkpoint contract)
     payload = torch.load(final, map_location="cpu", weights_only=True)
-    assert payload["checkpoint_schema_version"] == 6
+    assert payload["checkpoint_schema_version"] == 7
     assert payload["step"] == 48
     assert payload["run_config"]["model_spec"] == "tiny"
     assert payload["model_config"]["architecture"] == "SakiGoModel"

@@ -99,7 +99,15 @@ def stage_artifacts(args: argparse.Namespace) -> None:
 
 def stage_index(args: argparse.Namespace) -> None:
     database = args.run_dir / "book_index.sqlite"
-    parse_report = index_book_archive(args.book_archive, database)
+    archive_marker = args.run_dir / "archive_index_complete.json"
+    if archive_marker.exists():
+        parse_report = json.loads(archive_marker.read_text(encoding="utf-8"))
+    else:
+        parse_report = index_book_archive(args.book_archive, database)
+        write_atomic_json(
+            archive_marker,
+            {**parse_report, "archive_sha256": file_sha256(args.book_archive)},
+        )
     validation_report = assign_validated_histories(database)
     sample_report = freeze_uniform_sample(
         database,

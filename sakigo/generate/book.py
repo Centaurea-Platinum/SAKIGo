@@ -318,7 +318,9 @@ def assign_validated_histories(database: Path, root_id: str | None = None) -> di
         if expected_next != next_player:
             return None
         page_board = [int(value) for value in json.loads(board_json)]
-        engine_board = [int(value) for value in game.engine.board()]
+        engine_board = [
+            2 if int(value) == -1 else int(value) for value in game.engine.board()
+        ]
         symmetries = [
             symmetry
             for symmetry in range(8)

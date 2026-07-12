@@ -29,8 +29,6 @@ _ARRAY_NAMES = (
     "wdl_mask",
     "score",
     "score_mask",
-    "ownership",
-    "ownership_mask",
     "policy",
     "policy_mask",
     "budget",
@@ -143,10 +141,6 @@ class PreparedDataset(Dataset[dict[str, np.ndarray]]):
             if transform:
                 size = group.board_size
                 sample["board_planes"] = _d4_transform_planes(sample["board_planes"], transform)
-                for key in ("ownership",):
-                    sample[key] = _d4_transform_planes(
-                        sample[key].reshape(size, size), transform
-                    ).reshape(-1)
                 for key in ("policy", "budget", "legal_mask"):
                     vector = sample[key].copy()
                     vector[:-1] = _d4_transform_planes(
@@ -334,8 +328,6 @@ def batch_from_prepared_arrays(arrays: Mapping[str, Any]) -> dict[str, torch.Ten
         "wdl_mask": tensor("wdl_mask"),
         "score_target": tensor("score", np.float32).unsqueeze(1),
         "score_mask": tensor("score_mask"),
-        "ownership_target": tensor("ownership", np.float32),
-        "ownership_mask": tensor("ownership_mask"),
         "policy_target": tensor("policy", np.float32),
         "policy_mask": tensor("policy_mask"),
         "budget_target": tensor("budget", np.float32),
@@ -372,8 +364,6 @@ def collate_prepared(
             "wdl_mask": stack("wdl_mask"),
             "score": stack("score", np.float32),
             "score_mask": stack("score_mask"),
-            "ownership": stack("ownership", np.float32),
-            "ownership_mask": stack("ownership_mask"),
             "policy": stack("policy", np.float32),
             "policy_mask": stack("policy_mask"),
             "budget": stack("budget", np.float32),

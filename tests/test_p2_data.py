@@ -112,7 +112,6 @@ def test_prepared_arrays_round_trip(prepared: tuple[Path, Path]) -> None:
             np.testing.assert_array_equal(arrays["rule_features"][row], legacy.rule_features)
             np.testing.assert_array_equal(arrays["wdl"][row], legacy.wdl)
             assert arrays["score"][row] == np.float32(legacy.score)
-            np.testing.assert_array_equal(arrays["ownership"][row], legacy.ownership)
             np.testing.assert_array_equal(arrays["policy"][row], legacy.policy)
             np.testing.assert_array_equal(arrays["budget"][row], legacy.budget)
             np.testing.assert_array_equal(arrays["legal_mask"][row], legacy.legal_mask)
@@ -127,6 +126,28 @@ def test_prepare_is_cached(prepared: tuple[Path, Path]) -> None:
         [jsonl_path], out_dir, seed=SEED, val_fraction=VAL_FRACTION
     )
     assert manifest_after == manifest_before
+
+
+def test_prepare_preserves_explicit_validation_sources(tmp_path: Path) -> None:
+    train_path = tmp_path / "train.jsonl"
+    validation_path = tmp_path / "validation.jsonl"
+    rng = random.Random(31)
+    with train_path.open("w", encoding="utf-8") as handle:
+        for index in range(5):
+            handle.write(json.dumps(_make_raw_record(rng, 5, "tromp-taylor", index)) + "\n")
+    with validation_path.open("w", encoding="utf-8") as handle:
+        for index in range(3):
+            handle.write(json.dumps(_make_raw_record(rng, 5, "tromp-taylor", 100 + index)) + "\n")
+    manifest = prepare_tensor_shards(
+        [train_path],
+        tmp_path / "prepared-explicit",
+        validation_data=[validation_path],
+        seed=99,
+        val_fraction=0.99,
+    )
+    counts = {group["split"]: group["count"] for group in manifest["groups"]}
+    assert counts == {"train": 5, "val": 3}
+    assert manifest["split_mode"] == "explicit"
 
 
 def test_force_prepare_atomically_switches_generation(prepared: tuple[Path, Path]) -> None:
@@ -257,8 +278,6 @@ def test_collate_layout_and_values(prepared: tuple[Path, Path]) -> None:
         "wdl_mask": ((4,), torch.bool),
         "score_target": ((4, 1), torch.float32),
         "score_mask": ((4,), torch.bool),
-        "ownership_target": ((4, area), torch.float32),
-        "ownership_mask": ((4,), torch.bool),
         "policy_target": ((4, area + 1), torch.float32),
         "policy_mask": ((4,), torch.bool),
         "budget_target": ((4, area + 1), torch.float32),
@@ -315,7 +334,6 @@ def test_augmentation_matches_legacy(prepared: tuple[Path, Path]) -> None:
             transform,
         )
         np.testing.assert_array_equal(sample["board_planes"], legacy.board_planes)
-        np.testing.assert_array_equal(sample["ownership"], legacy.ownership)
         np.testing.assert_array_equal(sample["policy"], legacy.policy)
         np.testing.assert_array_equal(sample["budget"], legacy.budget)
         np.testing.assert_array_equal(sample["legal_mask"], legacy.legal_mask)
@@ -333,7 +351,7 @@ def _record_from_sample(sample: dict, size: int):
         rule_features=np.asarray(sample["rule_features"]),
         wdl=np.asarray(sample["wdl"]),
         score=float(sample["score"]),
-        ownership=np.asarray(sample["ownership"]),
+        ownership=None,
         policy=np.asarray(sample["policy"]),
         budget=np.asarray(sample["budget"]),
         legal_mask=np.asarray(sample["legal_mask"]),

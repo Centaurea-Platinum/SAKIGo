@@ -51,6 +51,7 @@ def benchmark_batch_size(
     max_seconds: float = 20.0,
     lr: float = 3e-4,
     weight_decay: float = 0.01,
+    compile_mode: str = "off",
 ) -> tuple[float | None, int, str]:
     """Benchmark one (spec, batch size). Returns (samples/s or None, peak bytes, reason)."""
     amp_dtype = torch.bfloat16 if device.type == "cuda" else None
@@ -60,6 +61,9 @@ def benchmark_batch_size(
     try:
         config = config_from_spec(spec, board_size=max(board_size, config_from_spec(spec).board_size))
         model = SakiGoNet(config).to(device)
+        if compile_mode != "off":
+            mode = None if compile_mode == "default" else compile_mode
+            model = torch.compile(model, mode=mode)
         model.train()
         optimizer = torch.optim.AdamW(
             optimizer_param_groups(model, weight_decay),
@@ -99,6 +103,8 @@ def benchmark_batch_size(
         return batch_size * completed / elapsed, peak, "ok"
     except torch.OutOfMemoryError:
         return None, 0, "oom"
+    except Exception as error:  # noqa: BLE001 - benchmark records rejected candidates
+        return None, 0, f"error:{type(error).__name__}:{error}"
     finally:
         del model, optimizer
         gc.collect()
@@ -114,6 +120,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--timed-steps", type=int, default=8)
     parser.add_argument("--budget-fraction", type=float, default=0.85)
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--compile", choices=("off", "default", "reduce-overhead"), default="reduce-overhead"
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
 
@@ -136,6 +145,7 @@ def main(argv: list[str] | None = None) -> None:
             device,
             timed_steps=args.timed_steps,
             memory_budget=budget,
+            compile_mode=args.compile,
         )
         results.append(
             {"batch_size": batch_size, "samples_per_second": rate, "peak_bytes": peak, "reason": reason}
