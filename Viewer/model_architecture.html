@@ -264,7 +264,7 @@
 
     <section class="facts" aria-label="Controlled comparison facts">
       <div class="fact"><strong>128</strong><span>fixed expanded channel m</span></div>
-      <div class="fact"><strong>5.405M</strong><span>target trunk parameters · ±0.2%</span></div>
+      <div class="fact"><strong>5.418M</strong><span>target trunk parameters · ±0.6%</span></div>
       <div class="fact"><strong id="selected-drift">0.000%</strong><span>selected model budget drift</span></div>
     </section>
 
@@ -329,9 +329,9 @@
       "use strict";
       var root = document.getElementById("depth-width-app");
       var select = document.getElementById("model-select");
-      var target = 5405426;
+      var target = 5418202;
       var specs = {
-        "narrow-deep": { n: 40, blocks: 33, params: 5407669 },
+        "narrow-deep": { n: 32, blocks: 46, params: 5450444 },
         "balanced": { n: 64, blocks: 16, params: 5405426 },
         "wide-shallow": { n: 128, blocks: 5, params: 5398737 }
       };
@@ -354,7 +354,7 @@
           row.setAttribute("aria-pressed", name === selected ? "true" : "false");
           row.innerHTML =
             "<span><strong>" + name + "</strong><small>" + (2 * spec.blocks) + " attention calls · L×n " + (spec.blocks * spec.n) + "</small></span>" +
-            "<span class=\"measure\"><span class=\"measure-value\">" + spec.blocks + "</span><span class=\"track\"><span class=\"fill depth-fill\" style=\"--fill:" + (100 * spec.blocks / 33).toFixed(1) + "%\"></span></span></span>" +
+            "<span class=\"measure\"><span class=\"measure-value\">" + spec.blocks + "</span><span class=\"track\"><span class=\"fill depth-fill\" style=\"--fill:" + (100 * spec.blocks / 46).toFixed(1) + "%\"></span></span></span>" +
             "<span class=\"measure\"><span class=\"measure-value\">" + spec.n + "</span><span class=\"track\"><span class=\"fill width-fill\" style=\"--fill:" + (100 * spec.n / 128).toFixed(1) + "%\"></span></span></span>" +
             "<span class=\"param\"><strong>" + spec.params.toLocaleString("en-US") + "</strong><small>" + signedPercent(spec.params) + " from target</small></span>";
           host.appendChild(row);

@@ -16,11 +16,12 @@ from sakigo.model.specs import (
 
 
 SPEC_TRUNK_PARAMETER_COUNTS = {
-    "narrow-deep": 5_407_669,
+    "narrow-deep": 5_450_444,
     "balanced": 5_405_426,
     "wide-shallow": 5_398_737,
 }
-TRUNK_PARAMETER_TARGET = 5_405_426
+TRUNK_PARAMETER_TARGET = 5_418_202
+TRUNK_PARAMETER_TOLERANCE = 0.006
 
 
 def test_schema_and_spec_names() -> None:
@@ -28,7 +29,7 @@ def test_schema_and_spec_names() -> None:
     assert specs["schema_version"] == 5
     assert "trunk_layouts" not in specs
     assert specs["comparison"]["target_trunk_parameters"] == TRUNK_PARAMETER_TARGET
-    assert specs["comparison"]["relative_tolerance"] == 0.002
+    assert specs["comparison"]["relative_tolerance"] == TRUNK_PARAMETER_TOLERANCE
     assert model_spec_names() == tuple(SPEC_TRUNK_PARAMETER_COUNTS)
 
 
@@ -54,7 +55,10 @@ def test_all_specs_build_with_fixed_d4_schedule(name: str) -> None:
 
     count = model.trunk_parameter_count()
     assert count == SPEC_TRUNK_PARAMETER_COUNTS[name]
-    assert abs(count - TRUNK_PARAMETER_TARGET) / TRUNK_PARAMETER_TARGET <= 0.002
+    assert (
+        abs(count - TRUNK_PARAMETER_TARGET) / TRUNK_PARAMETER_TARGET
+        <= TRUNK_PARAMETER_TOLERANCE
+    )
 
 
 def test_balanced_is_default_model() -> None:

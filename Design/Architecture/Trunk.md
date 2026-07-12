@@ -36,7 +36,7 @@ fixed while trading bottleneck width against depth:
 
 | Spec | Bottleneck `n` | Blocks `L` | Trunk parameters |
 |---|---:|---:|---:|
-| `narrow-deep` | 40 | 33 | 5,407,669 |
+| `narrow-deep` | 32 | 46 | 5,450,444 |
 | `balanced` (default) | 64 | 16 | 5,405,426 |
 | `wide-shallow` | 128 | 5 | 5,398,737 |
 

@@ -27,7 +27,7 @@ to inspect the program and compare the depth/width sweep.
 | Attention heads | `Hq = 2`, `Hkv = 1` |
 | Board block | plain `m -> n`, two self-attentions, `n -> m` |
 | Register exchange | one initial broadcast, one final gather |
-| Trunk parameter target | `5,405,426`, tolerance `0.2%` |
+| Trunk parameter target | `5,418,202`, tolerance `0.6%` |
 
 There is no scalar-control model, SwiGLU variant, FiLM path, repeated register
 cycle, or general trunk-layout experiment in the current architecture.
@@ -36,13 +36,13 @@ cycle, or general trunk-layout experiment in the current architecture.
 
 All three models keep `m = 128` and every non-board-block width fixed. Integer
 block counts make exact parameter equality impossible, so the sweep uses the
-closest useful configurations within `0.2%` of the balanced target.
+closest useful power-of-two bottlenecks within `0.6%` of their mean target.
 
 | Spec | Bottleneck `n` | Blocks `L` | Parameters in blocks | Broadcast | Gather | Trunk total | Difference from target |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `narrow-deep` | 40 | 33 | 5,259,507 | 82,305 | 65,857 | 5,407,669 | +0.041% |
-| `balanced` (default) | 64 | 16 | 5,257,264 | 82,305 | 65,857 | 5,405,426 | 0.000% |
-| `wide-shallow` | 128 | 5 | 5,250,575 | 82,305 | 65,857 | 5,398,737 | -0.124% |
+| `narrow-deep` | 32 | 46 | 5,302,282 | 82,305 | 65,857 | 5,450,444 | +0.595% |
+| `balanced` (default) | 64 | 16 | 5,257,264 | 82,305 | 65,857 | 5,405,426 | -0.236% |
+| `wide-shallow` | 128 | 5 | 5,250,575 | 82,305 | 65,857 | 5,398,737 | -0.359% |
 
 This is a controlled depth-versus-width comparison, not three unrelated model
 designs.
@@ -57,7 +57,7 @@ S   board token count = N * N
 R   register count = 2
 
 m   persistent board width = 128
-n   board-block bottleneck width = 40, 64, or 128
+n   board-block bottleneck width = 32, 64, or 128 regular reps
 r   persistent width of each register = 64
 a   register cross-attention width = 32
 ```
@@ -317,7 +317,7 @@ nearly identical trunk parameters:
 
 | Spec | Attention calls | `L*n` work proxy | `L*m` retained-depth proxy |
 |---|---:|---:|---:|
-| `narrow-deep` | 66 | 1,320 | 4,224 |
+| `narrow-deep` | 92 | 1,472 | 5,888 |
 | `balanced` | 32 | 1,024 | 2,048 |
 | `wide-shallow` | 10 | 640 | 640 |
 
