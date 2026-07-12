@@ -13,8 +13,8 @@
     "max_board_size caps square inputs; rules initialize registers; pass logits are appended after board logits."
   ],
   "comparison": {
-    "target_trunk_parameters": 5418202,
-    "relative_tolerance": 0.006,
+    "target_attention_work_proxy": 1024,
+    "constraint": "block_count * bottleneck_channel",
     "fixed_expanded_channel": 128,
     "varied": ["bottleneck_channel", "block_count"]
   },
@@ -41,14 +41,14 @@
   "models": {
     "narrow-deep": {
       "trunk": {
-        "block_count": 46,
+        "block_count": 32,
         "bottleneck_channel": 32
       }
     },
     "balanced": {},
     "wide-shallow": {
       "trunk": {
-        "block_count": 5,
+        "block_count": 8,
         "bottleneck_channel": 128
       }
     }

@@ -16,20 +16,19 @@ from sakigo.model.specs import (
 
 
 SPEC_TRUNK_PARAMETER_COUNTS = {
-    "narrow-deep": 5_450_444,
+    "narrow-deep": 3_836_706,
     "balanced": 5_405_426,
-    "wide-shallow": 5_398_737,
+    "wide-shallow": 8_549_082,
 }
-TRUNK_PARAMETER_TARGET = 5_418_202
-TRUNK_PARAMETER_TOLERANCE = 0.006
+ATTENTION_WORK_TARGET = 1024
 
 
 def test_schema_and_spec_names() -> None:
     specs = load_model_specs()
     assert specs["schema_version"] == 5
     assert "trunk_layouts" not in specs
-    assert specs["comparison"]["target_trunk_parameters"] == TRUNK_PARAMETER_TARGET
-    assert specs["comparison"]["relative_tolerance"] == TRUNK_PARAMETER_TOLERANCE
+    assert specs["comparison"]["target_attention_work_proxy"] == ATTENTION_WORK_TARGET
+    assert specs["comparison"]["constraint"] == "block_count * bottleneck_channel"
     assert model_spec_names() == tuple(SPEC_TRUNK_PARAMETER_COUNTS)
 
 
@@ -55,10 +54,7 @@ def test_all_specs_build_with_fixed_d4_schedule(name: str) -> None:
 
     count = model.trunk_parameter_count()
     assert count == SPEC_TRUNK_PARAMETER_COUNTS[name]
-    assert (
-        abs(count - TRUNK_PARAMETER_TARGET) / TRUNK_PARAMETER_TARGET
-        <= TRUNK_PARAMETER_TOLERANCE
-    )
+    assert config.block_count * config.bottleneck_channels == ATTENTION_WORK_TARGET
 
 
 def test_balanced_is_default_model() -> None:

@@ -250,7 +250,7 @@
     <header>
       <div>
         <h1>SAKIGo depth–width sweep</h1>
-        <p class="subtitle">One architecture, one trunk budget, one controlled bottleneck-versus-depth comparison.</p>
+        <p class="subtitle">One architecture, one attention-work proxy, one controlled bottleneck-versus-depth comparison.</p>
       </div>
       <label class="field" for="model-select">
         Packaged model
@@ -264,8 +264,8 @@
 
     <section class="facts" aria-label="Controlled comparison facts">
       <div class="fact"><strong>128</strong><span>fixed expanded channel m</span></div>
-      <div class="fact"><strong>5.418M</strong><span>target trunk parameters · ±0.6%</span></div>
-      <div class="fact"><strong id="selected-drift">0.000%</strong><span>selected model budget drift</span></div>
+      <div class="fact"><strong>1,024</strong><span>fixed L × n attention-work proxy</span></div>
+      <div class="fact"><strong id="selected-params">5,405,426</strong><span>selected trunk parameters</span></div>
     </section>
 
     <section class="pipeline" aria-labelledby="pipeline-title">
@@ -307,7 +307,7 @@
 
     <section aria-labelledby="comparison-title">
       <div class="comparison-head">
-        <h2 id="comparison-title">Matched-budget comparison</h2>
+        <h2 id="comparison-title">Matched-attention-work comparison</h2>
         <span>Depth and bottleneck move; symmetry, m, registers, heads, and block structure do not.</span>
       </div>
       <div class="compare-labels" aria-hidden="true">
@@ -319,7 +319,7 @@
         <span><strong>D4</strong> G=8</span>
         <span><strong>Register path</strong> 2 × 64, attention 32</span>
         <span><strong>Board block</strong> plain, two attentions</span>
-        <span><strong>Compute proxy</strong> L × n varies despite matched parameters</span>
+        <span><strong>Compute proxy</strong> L × n = 1,024 for every model</span>
       </div>
     </section>
   </main>
@@ -329,18 +329,11 @@
       "use strict";
       var root = document.getElementById("depth-width-app");
       var select = document.getElementById("model-select");
-      var target = 5418202;
       var specs = {
-        "narrow-deep": { n: 32, blocks: 46, params: 5450444 },
+        "narrow-deep": { n: 32, blocks: 32, params: 3836706 },
         "balanced": { n: 64, blocks: 16, params: 5405426 },
-        "wide-shallow": { n: 128, blocks: 5, params: 5398737 }
+        "wide-shallow": { n: 128, blocks: 8, params: 8549082 }
       };
-
-      function signedPercent(value) {
-        var percent = 100 * (value - target) / target;
-        if (Math.abs(percent) < 0.0005) return "0.000%";
-        return (percent > 0 ? "+" : "") + percent.toFixed(3) + "%";
-      }
 
       function renderRows(selected) {
         var host = document.getElementById("comparison-rows");
@@ -354,16 +347,16 @@
           row.setAttribute("aria-pressed", name === selected ? "true" : "false");
           row.innerHTML =
             "<span><strong>" + name + "</strong><small>" + (2 * spec.blocks) + " attention calls · L×n " + (spec.blocks * spec.n) + "</small></span>" +
-            "<span class=\"measure\"><span class=\"measure-value\">" + spec.blocks + "</span><span class=\"track\"><span class=\"fill depth-fill\" style=\"--fill:" + (100 * spec.blocks / 46).toFixed(1) + "%\"></span></span></span>" +
+            "<span class=\"measure\"><span class=\"measure-value\">" + spec.blocks + "</span><span class=\"track\"><span class=\"fill depth-fill\" style=\"--fill:" + (100 * spec.blocks / 32).toFixed(1) + "%\"></span></span></span>" +
             "<span class=\"measure\"><span class=\"measure-value\">" + spec.n + "</span><span class=\"track\"><span class=\"fill width-fill\" style=\"--fill:" + (100 * spec.n / 128).toFixed(1) + "%\"></span></span></span>" +
-            "<span class=\"param\"><strong>" + spec.params.toLocaleString("en-US") + "</strong><small>" + signedPercent(spec.params) + " from target</small></span>";
+            "<span class=\"param\"><strong>" + spec.params.toLocaleString("en-US") + "</strong><small>trunk parameters</small></span>";
           host.appendChild(row);
         });
       }
 
       function render(name) {
         var spec = specs[name];
-        document.getElementById("selected-drift").textContent = signedPercent(spec.params);
+        document.getElementById("selected-params").textContent = spec.params.toLocaleString("en-US");
         document.getElementById("block-title").textContent = spec.blocks + " plain blocks";
         document.getElementById("block-shape").textContent = "128 → " + spec.n + " → 128";
         document.getElementById("block-detail").textContent =

@@ -3,7 +3,7 @@
 SAKIGo uses one deliberately narrow model family: a D4-equivariant board
 stream, a small rule/register stream, and a fixed trunk program. The packaged
 models vary only the board bottleneck width `n` and the number of board blocks
-`L` while holding the persistent board width and trunk parameter budget fixed.
+`L` while holding the persistent board width and `L * n = 1024` fixed.
 
 The implementation lives in `sakigo/model/model.py` and
 `sakigo/model/layers.py`. Reusable regular-representation operations live in
@@ -27,22 +27,22 @@ to inspect the program and compare the depth/width sweep.
 | Attention heads | `Hq = 2`, `Hkv = 1` |
 | Board block | plain `m -> n`, two self-attentions, `n -> m` |
 | Register exchange | one initial broadcast, one final gather |
-| Trunk parameter target | `5,418,202`, tolerance `0.6%` |
+| Attention-work proxy | `L * n = 1024` exactly |
 
 There is no scalar-control model, SwiGLU variant, FiLM path, repeated register
 cycle, or general trunk-layout experiment in the current architecture.
 
 ## Packaged Depth/Width Sweep
 
-All three models keep `m = 128` and every non-board-block width fixed. Integer
-block counts make exact parameter equality impossible, so the sweep uses the
-closest useful power-of-two bottlenecks within `0.6%` of their mean target.
+All three models keep `m = 128` and every non-board-block width fixed. The
+power-of-two bottlenecks use reciprocal block counts so `L * n = 1024`
+exactly. Parameter count is reported rather than controlled.
 
-| Spec | Bottleneck `n` | Blocks `L` | Parameters in blocks | Broadcast | Gather | Trunk total | Difference from target |
+| Spec | Bottleneck `n` | Blocks `L` | `L*n` | Parameters in blocks | Broadcast | Gather | Trunk total |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `narrow-deep` | 32 | 46 | 5,302,282 | 82,305 | 65,857 | 5,450,444 | +0.595% |
-| `balanced` (default) | 64 | 16 | 5,257,264 | 82,305 | 65,857 | 5,405,426 | -0.236% |
-| `wide-shallow` | 128 | 5 | 5,250,575 | 82,305 | 65,857 | 5,398,737 | -0.359% |
+| `narrow-deep` | 32 | 32 | 1,024 | 3,688,544 | 82,305 | 65,857 | 3,836,706 |
+| `balanced` (default) | 64 | 16 | 1,024 | 5,257,264 | 82,305 | 65,857 | 5,405,426 |
+| `wide-shallow` | 128 | 8 | 1,024 | 8,400,920 | 82,305 | 65,857 | 8,549,082 |
 
 This is a controlled depth-versus-width comparison, not three unrelated model
 designs.
@@ -195,8 +195,8 @@ Therefore:
 P_trunk(n, L) = 148,162 + L * (48*n^2 + 2058*n + 259)
 ```
 
-The trunk budget controls the comparison; it does not count the fixed stem,
-rule MLP, or output heads.
+This trunk count is reported but not controlled by the comparison. It excludes
+the fixed stem, rule MLP, and output heads; the controlled quantity is `L*n`.
 
 ## Grouped-Query Attention
 
@@ -304,7 +304,7 @@ All seven subheads are built unconditionally.
 Hidden projections use SiLU and final projections are linear. The group axis is
 always mean-pooled in the heads.
 
-## Parameter Equality Is Not Compute Equality
+## What the Matched Proxy Controls
 
 At fixed board size, board-attention mixing scales approximately as:
 
@@ -312,17 +312,17 @@ At fixed board size, board-attention mixing scales approximately as:
 O(L * G * S^2 * n)
 ```
 
-The three models therefore have different depth and attention work despite
-nearly identical trunk parameters:
+The three models therefore match the leading board-token attention-mixing
+proxy. They do not match parameters, activation depth, projection work, or
+wall-clock latency:
 
-| Spec | Attention calls | `L*n` work proxy | `L*m` retained-depth proxy |
-|---|---:|---:|---:|
-| `narrow-deep` | 92 | 1,472 | 5,888 |
-| `balanced` | 32 | 1,024 | 2,048 |
-| `wide-shallow` | 10 | 640 | 640 |
+| Spec | Attention calls | `L*n` | `L*n^2` width-work proxy | `L*m` retained-depth proxy |
+|---|---:|---:|---:|---:|
+| `narrow-deep` | 64 | 1,024 | 32,768 | 4,096 |
+| `balanced` | 32 | 1,024 | 65,536 | 2,048 |
+| `wide-shallow` | 16 | 1,024 | 131,072 | 1,024 |
 
-Narrow/deep supplies more sequential transformations but costs more attention
-mixing, activation memory, and optimization depth. Wide/shallow supplies richer
-features inside each block with fewer sequential steps and lower token-mixing
-cost. The balanced model is the default until training and paired-game evidence
-justify moving toward either extreme.
+Narrow/deep supplies more sequential transformations and activation depth.
+Wide/shallow supplies richer per-step features and more width-dependent
+projection work. The balanced model is the default until training and
+paired-game evidence justify moving toward either extreme.

@@ -31,14 +31,14 @@ working bottleneck `n`, applies two independent D4-equivariant self-attention
 updates, and projects back to `m`. Blocks do not read registers and contain no
 FiLM or other conditioning branch.
 
-The packaged sweep holds every other width and the trunk parameter budget
-fixed while trading bottleneck width against depth:
+The packaged sweep holds every other width and the attention-mixing work proxy
+`L * n = 1024` fixed while trading bottleneck width against depth:
 
 | Spec | Bottleneck `n` | Blocks `L` | Trunk parameters |
 |---|---:|---:|---:|
-| `narrow-deep` | 32 | 46 | 5,450,444 |
+| `narrow-deep` | 32 | 32 | 3,836,706 |
 | `balanced` (default) | 64 | 16 | 5,405,426 |
-| `wide-shallow` | 128 | 5 | 5,398,737 |
+| `wide-shallow` | 128 | 8 | 8,549,082 |
 
 All board and register attention preserves whole-network D4 equivariance. The
 exact block formula, exchange counts, and compute caveat are documented in
