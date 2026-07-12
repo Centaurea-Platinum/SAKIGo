@@ -1,4 +1,4 @@
-"""One-time conversion: schema-v1 JSONL(.zst) -> mmap-able per-(split, board size)
+"""One-time conversion: schema-v1/v2 JSONL(.zst) -> mmap-able per-(split, board size)
 tensor shards. Decode+validate once at prepare time; training then reads
 numpy memmaps with zero JSON cost.
 

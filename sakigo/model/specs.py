@@ -1,10 +1,7 @@
-"""Slim spec loader: JSON model specs -> SakiGoModelConfig.
+"""Slim spec loader: declarative JSON model sizes -> SakiGoModelConfig.
 
-The spec *format* is frozen (schema_version 3, includes, named stem/head
-shapes, `expanded_channel * register_count`-style derived dims, pass_-prefixed
-global heads appended to spatial action heads). This replaces the legacy
-590-line parser; markdown-fence stripping, YAML fallback, `base` shape
-inheritance, and legacy key aliases are intentionally gone.
+Schema 5 keeps one fixed model program and shared model defaults. Model entries
+contain only sizing overrides for controlled width/depth comparisons.
 
 The packaged JSON files next to this module are the source of truth for model
 specs used by training, tests, and checkpoint construction.
@@ -28,8 +25,6 @@ ARCHITECTURE_TAGS = {
     "d4_equivariant": "SakiGoModel",
     "saki_go_model": "SakiGoModel",
     "SakiGoModel": "SakiGoModel",
-    "scalar_control": "ScalarSakiGoModel",
-    "ScalarSakiGoModel": "ScalarSakiGoModel",
 }
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -83,12 +78,6 @@ def _resolve_float(raw: Any, label: str) -> float:
     raise ValueError(f"{label} must be a number or expression, got {type(raw).__name__}")
 
 
-def _int_tuple(raw: Any, label: str) -> tuple[int, ...]:
-    if not isinstance(raw, (list, tuple)):
-        raise ValueError(f"{label} must be a list of integers")
-    return tuple(int(item) for item in raw)
-
-
 def _channels(raw: Any, context: Mapping[str, float], label: str) -> tuple[int, ...]:
     if not isinstance(raw, (list, tuple)) or len(raw) < 2:
         raise ValueError(f"{label} must be a list of at least two channel entries")
@@ -117,6 +106,8 @@ def load_model_specs(path: str | Path | None = None) -> dict[str, Any]:
     if spec_path.is_dir():
         spec_path = spec_path / "ModelSpecs.json"
     specs = _load_json(spec_path)
+    if specs.get("schema_version") != 5:
+        raise ValueError("model specs must use schema_version 5")
     includes = specs.get("includes", {})
     if not isinstance(includes, Mapping):
         raise ValueError("includes must be a mapping")
@@ -130,6 +121,28 @@ def load_model_specs(path: str | Path | None = None) -> dict[str, Any]:
 
 def model_spec_names(path: str | Path | None = None) -> tuple[str, ...]:
     return tuple(load_model_specs(path).get("models", {}))
+
+
+def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        existing = merged.get(key)
+        if isinstance(existing, Mapping) and isinstance(value, Mapping):
+            merged[key] = _deep_merge(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _resolved_model_spec(specs: Mapping[str, Any], name: str) -> dict[str, Any]:
+    defaults = specs.get("model_defaults", {})
+    models = specs.get("models", {})
+    if not isinstance(defaults, Mapping):
+        raise ValueError("model_defaults must be a mapping")
+    override = models[name]
+    if not isinstance(override, Mapping):
+        raise ValueError(f"model spec {name!r} must be a mapping")
+    return _deep_merge(defaults, override)
 
 
 def _shape(specs: Mapping[str, Any], spec: Mapping[str, Any], kind: str, name_field: str) -> dict[str, Any]:
@@ -163,14 +176,12 @@ def config_from_spec(
     board_size: int | None = None,
 ) -> SakiGoModelConfig:
     specs = load_model_specs(path)
-    name = model_name or str(specs.get("default_model", "plain"))
+    name = model_name or str(specs.get("default_model", "balanced"))
     models = specs.get("models", {})
     if name not in models:
         available = ", ".join(str(item) for item in models)
         raise ValueError(f"unknown model spec {name!r}; available specs: {available}")
-    spec = models[name]
-    if not isinstance(spec, Mapping):
-        raise ValueError(f"model spec {name!r} must be a mapping")
+    spec = _resolved_model_spec(specs, name)
 
     architecture_tag = str(spec.get("architecture", "d4_equivariant"))
     if architecture_tag not in ARCHITECTURE_TAGS:
@@ -182,6 +193,7 @@ def config_from_spec(
     if not isinstance(trunk, Mapping):
         raise ValueError(f"{name} must contain a trunk mapping")
 
+    block_count = int(trunk["block_count"])
     register_count = int(trunk["register_count"])
     expanded_channel = int(trunk["expanded_channel"])
     register_channels = int(trunk.get("register_channel", expanded_channel))
@@ -200,6 +212,7 @@ def config_from_spec(
 
     context: dict[str, float] = {
         "register_count": register_count,
+        "block_count": block_count,
         "expanded_channel": expanded_channel,
         "register_channel": register_channels,
         "bottleneck_channel": bottleneck_channels,
@@ -232,12 +245,8 @@ def config_from_spec(
     score_channels = global_channels("score")
     policy_pass_channels = global_channels("pass_policy")
     budget_pass_channels = global_channels("pass_budget")
-    ownership_channels = spatial_channels("ownership")
     policy_channels = spatial_channels("policy")
     budget_channels = spatial_channels("budget")
-
-    gather_raw = trunk.get("register_gather_blocks", "all")
-    gather_blocks = None if gather_raw == "all" else _int_tuple(gather_raw, "register_gather_blocks")
 
     global_frequencies = tuple(
         _resolve_float(item, "global_rope_frequencies")
@@ -260,8 +269,7 @@ def config_from_spec(
         stem_channels=stem_channels,
         rule_mlp_channels=rule_mlp_channels,
         activation=str(spec.get("activation", "none")),
-        trunk_mlp_variant=str(trunk.get("mlp_variant", "plain")),
-        block_count=int(trunk["block_count"]),
+        block_count=block_count,
         register_count=register_count,
         trunk_channels=expanded_channel,
         expanded_channel=expanded_channel,
@@ -274,16 +282,10 @@ def config_from_spec(
         register_head_dim=register_head_dim,
         global_rope_frequencies=global_frequencies,
         local_rope_frequencies=local_frequencies,
-        gather_blocks=gather_blocks,
-        broadcast_blocks=_int_tuple(
-            trunk.get("register_broadcast_blocks", []), "register_broadcast_blocks"
-        ),
         wdl_hidden=wdl_channels[-2],
         wdl_outputs=wdl_channels[-1],
         score_hidden=score_channels[-2],
         score_outputs=score_channels[-1],
-        ownership_hidden=ownership_channels[-2],
-        ownership_outputs=ownership_channels[-1],
         policy_hidden=policy_channels[-2],
         policy_outputs=policy_channels[-1],
         policy_pass_hidden=policy_pass_channels[-2],
@@ -294,7 +296,6 @@ def config_from_spec(
         budget_pass_outputs=budget_pass_channels[-1],
         wdl_channels=wdl_channels,
         score_channels=score_channels,
-        ownership_channels=ownership_channels,
         policy_channels=policy_channels,
         policy_pass_channels=policy_pass_channels,
         budget_channels=budget_channels,

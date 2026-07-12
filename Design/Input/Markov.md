@@ -1,1 +1,8 @@
-I acknowledge how the current neural net input is not bijective with game state. Multiple game state could correspond to the same input, due to long-repeat and superko rules. However, the whole engine with search enabled restores Markovian properties, as different history correspond to a different hash stack in the engine, and model will see different legality results as the search progress.
+> **Current scope: distillation only.** The history-aware engine remains relevant
+> for producing the legality input plane; search-related behavior is not currently
+> considered.
+
+The neural-network input is not bijective with game state because long-repeat and
+superko rules depend on history. For current distillation, the history-aware engine
+retains that state and projects its effect into the NonTrivialIllegal input plane.
+The full history is intentionally not a neural-network input.

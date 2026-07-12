@@ -12,7 +12,6 @@ from sakigo.constants import HEADS
 class LossWeights:
     wdl: float = 1.0
     score: float = 1.0
-    ownership: float = 1.0
     policy: float = 1.0
     budget: float = 1.0
 
@@ -20,7 +19,6 @@ class LossWeights:
         return {
             "wdl": self.wdl,
             "score": self.score,
-            "ownership": self.ownership,
             "policy": self.policy,
             "budget": self.budget,
         }
@@ -52,18 +50,6 @@ def masked_smooth_l1(
     return (per_record * weights).sum() / weights.sum().clamp_min(1.0)
 
 
-def masked_ownership_bce(
-    logits: torch.Tensor,
-    target: torch.Tensor,
-    mask: torch.Tensor,
-) -> torch.Tensor:
-    target01 = ((target + 1.0) * 0.5).clamp(0.0, 1.0)
-    per_cell = F.binary_cross_entropy_with_logits(logits, target01, reduction="none")
-    per_record = per_cell.mean(dim=-1)
-    weights = mask.float()
-    return (per_record * weights).sum() / weights.sum().clamp_min(1.0)
-
-
 def compute_head_losses(
     output: dict[str, torch.Tensor],
     batch: dict[str, torch.Tensor],
@@ -78,11 +64,6 @@ def compute_head_losses(
             output["score"],
             batch["score_target"],
             batch["score_mask"],
-        ),
-        "ownership": masked_ownership_bce(
-            output["ownership_logits"],
-            batch["ownership_target"],
-            batch["ownership_mask"],
         ),
         "policy": masked_soft_cross_entropy(
             output["policy_logits"],

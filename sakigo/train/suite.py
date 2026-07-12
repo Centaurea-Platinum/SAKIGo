@@ -32,7 +32,7 @@ from sakigo.train.benchmark import benchmark_batch_size
 from sakigo.train.config import TrainConfig
 from sakigo.train.trainer import Trainer, resolve_device
 
-DEFAULT_SPECS = ("non-bottleneck", "plain", "swiglu")
+DEFAULT_SPECS = ("narrow-deep", "balanced", "wide-shallow")
 DEFAULT_BENCHMARK_BATCH_SIZES = (4, 8, 12, 16, 24, 32, 48, 64)
 
 
@@ -70,7 +70,7 @@ class SuiteConfig:
     checkpoint_interval: int = 1024
     val_batches: int = 64
     val_fixed: bool = True
-    model_compile: str = "default"
+    model_compile: str = "reduce-overhead"
     amp: str = "auto"
     device: str = "auto"
     augment_d4: bool = False
@@ -458,7 +458,11 @@ def parse_args(argv: list[str] | None = None) -> SuiteConfig:
         default=True,
         help="Replay one fixed validation subset for each metrics row.",
     )
-    parser.add_argument("--compile", choices=("off", "default", "reduce-overhead"), default="default")
+    parser.add_argument(
+        "--compile",
+        choices=("off", "default", "reduce-overhead"),
+        default="reduce-overhead",
+    )
     parser.add_argument("--amp", choices=("auto", "off"), default="auto")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--augment-d4", action="store_true")

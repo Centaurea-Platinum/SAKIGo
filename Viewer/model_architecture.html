@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SAKIGo Depth–Width Sweep</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page: #f5f7fa;
+      --surface: #ffffff;
+      --soft: #edf1f6;
+      --text: #17212e;
+      --muted: #5f6b7b;
+      --line: #cbd4df;
+      --board: #287bb8;
+      --register: #865ab0;
+      --exchange: #c17825;
+      --output: #2f8368;
+      --selected: #315efb;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page: #11161e;
+        --surface: #181f29;
+        --soft: #212b38;
+        --text: #edf2f8;
+        --muted: #abb7c6;
+        --line: #3b4858;
+        --board: #69b4e8;
+        --register: #c19be2;
+        --exchange: #efa958;
+        --output: #76caae;
+        --selected: #94aaff;
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.45;
+    }
+
+    button, select { font: inherit; }
+    button:focus-visible, select:focus-visible { outline: 3px solid var(--selected); outline-offset: 2px; }
+
+    .shell { max-width: 1460px; margin: 0 auto; padding: 24px; }
+
+    header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 20px;
+    }
+
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 4px; font-size: clamp(1.55rem, 3vw, 2.35rem); font-weight: 500; }
+    h2 { margin-bottom: 10px; font-size: 1.05rem; font-weight: 500; }
+    .subtitle { margin: 0; color: var(--muted); }
+
+    .field { display: grid; gap: 5px; color: var(--muted); font-size: .82rem; }
+    select {
+      min-height: 40px;
+      min-width: 190px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      padding: 7px 11px;
+    }
+
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .fact { border-top: 3px solid var(--line); padding: 10px 2px 0; }
+    .fact strong { display: block; font-size: clamp(1.15rem, 2.5vw, 1.65rem); font-weight: 500; }
+    .fact span { color: var(--muted); font-size: .82rem; }
+
+    .pipeline {
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      padding: 18px 0 20px;
+      margin-bottom: 24px;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: 1.05fr 1.15fr .85fr 3.2fr .85fr 1.15fr;
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .stage { min-width: 0; position: relative; }
+    .stage:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      top: 50%;
+      right: -14px;
+      transform: translateY(-50%);
+      color: var(--muted);
+    }
+
+    .stage-label {
+      color: var(--muted);
+      font-size: .75rem;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 7px;
+    }
+
+    .node {
+      min-height: 56px;
+      border-left: 4px solid var(--tone);
+      background: var(--soft);
+      padding: 9px 10px;
+      margin-bottom: 7px;
+    }
+
+    .node strong { display: block; font-weight: 500; }
+    .node small { display: block; color: var(--muted); margin-top: 2px; }
+    .board { --tone: var(--board); }
+    .register { --tone: var(--register); }
+    .exchange { --tone: var(--exchange); }
+    .output { --tone: var(--output); }
+
+    .block-stage { border-top: 3px solid var(--board); padding-top: 8px; }
+    .block-title { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .block-title strong { font-weight: 500; }
+    .block-title span { color: var(--muted); font-size: .8rem; }
+
+    .block-bank {
+      display: grid;
+      grid-template-columns: repeat(11, minmax(6px, 1fr));
+      gap: 4px;
+      min-height: 76px;
+      align-content: start;
+    }
+
+    .block-mark {
+      height: 32px;
+      border-top: 4px solid var(--board);
+      background: var(--soft);
+      position: relative;
+    }
+
+    .block-mark::after {
+      content: attr(data-index);
+      position: absolute;
+      inset: 5px 0 auto;
+      text-align: center;
+      color: var(--muted);
+      font-size: .65rem;
+    }
+
+    .block-detail { margin-top: 8px; color: var(--muted); font-size: .78rem; }
+
+    .comparison-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 18px;
+      margin-bottom: 10px;
+    }
+
+    .comparison-head h2 { margin: 0; }
+    .comparison-head span { color: var(--muted); font-size: .82rem; }
+
+    .compare-labels, .compare-row {
+      display: grid;
+      grid-template-columns: minmax(130px, .8fr) minmax(150px, 1.5fr) minmax(150px, 1.5fr) minmax(130px, .9fr);
+      gap: 14px;
+      align-items: center;
+    }
+
+    .compare-labels {
+      color: var(--muted);
+      font-size: .75rem;
+      padding: 0 12px 6px;
+    }
+
+    .compare-row {
+      width: 100%;
+      border: 1px solid transparent;
+      border-top-color: var(--line);
+      background: transparent;
+      color: var(--text);
+      text-align: left;
+      padding: 11px 12px;
+      cursor: pointer;
+    }
+
+    .compare-row:hover { background: var(--soft); }
+    .compare-row.is-selected { border-color: var(--selected); background: var(--soft); }
+    .compare-row strong { font-weight: 500; }
+    .compare-row small { display: block; color: var(--muted); }
+
+    .measure { display: grid; grid-template-columns: 42px 1fr; gap: 8px; align-items: center; }
+    .measure-value { font-weight: 500; }
+    .track { height: 9px; background: var(--soft); overflow: hidden; }
+    .fill { display: block; height: 100%; width: var(--fill); background: var(--tone); }
+    .depth-fill { --tone: var(--board); }
+    .width-fill { --tone: var(--exchange); }
+    .param { font-variant-numeric: tabular-nums; }
+
+    .constants {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      border-top: 1px solid var(--line);
+      margin-top: 18px;
+      padding-top: 12px;
+      color: var(--muted);
+      font-size: .8rem;
+    }
+
+    .constants strong { color: var(--text); font-weight: 500; }
+
+    @media (max-width: 980px) {
+      .flow { grid-template-columns: 1fr; }
+      .stage { padding-bottom: 17px; }
+      .stage:not(:last-child)::after { content: "↓"; top: auto; right: 50%; bottom: -2px; transform: translateX(50%); }
+      .block-bank { grid-template-columns: repeat(11, minmax(10px, 1fr)); }
+    }
+
+    @media (max-width: 720px) {
+      .shell { padding: 16px; }
+      header { align-items: stretch; flex-direction: column; }
+      select { width: 100%; }
+      .facts { grid-template-columns: 1fr; }
+      .comparison-head { align-items: flex-start; flex-direction: column; gap: 3px; }
+      .compare-labels { display: none; }
+      .compare-row { grid-template-columns: 1fr; gap: 9px; }
+      .measure { grid-template-columns: 54px 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell" id="depth-width-app">
+    <header>
+      <div>
+        <h1>SAKIGo depth–width sweep</h1>
+        <p class="subtitle">One architecture, one trunk budget, one controlled bottleneck-versus-depth comparison.</p>
+      </div>
+      <label class="field" for="model-select">
+        Packaged model
+        <select id="model-select">
+          <option value="narrow-deep">narrow-deep</option>
+          <option value="balanced" selected>balanced</option>
+          <option value="wide-shallow">wide-shallow</option>
+        </select>
+      </label>
+    </header>
+
+    <section class="facts" aria-label="Controlled comparison facts">
+      <div class="fact"><strong>128</strong><span>fixed expanded channel m</span></div>
+      <div class="fact"><strong>5.405M</strong><span>target trunk parameters · ±0.2%</span></div>
+      <div class="fact"><strong id="selected-drift">0.000%</strong><span>selected model budget drift</span></div>
+    </section>
+
+    <section class="pipeline" aria-labelledby="pipeline-title">
+      <h2 id="pipeline-title">Fixed forward program</h2>
+      <div class="flow">
+        <div class="stage">
+          <div class="stage-label">Inputs</div>
+          <div class="node board"><strong>Board</strong><small>[B, 6, N, N]</small></div>
+          <div class="node register"><strong>Rules</strong><small>[B, 10]</small></div>
+        </div>
+        <div class="stage">
+          <div class="stage-label">Initialize</div>
+          <div class="node board"><strong>Scalar stem → D4 lift</strong><small>1×1: 6 → 16 → 128, then G=8</small></div>
+          <div class="node register"><strong>2 registers</strong><small>10 → 32 → 2 × 64</small></div>
+        </div>
+        <div class="stage">
+          <div class="stage-label">Once</div>
+          <div class="node exchange"><strong>Broadcast</strong><small>registers → board</small></div>
+        </div>
+        <div class="stage block-stage">
+          <div class="block-title">
+            <strong id="block-title">16 plain blocks</strong>
+            <span id="block-shape">128 → 64 → 128</span>
+          </div>
+          <div class="block-bank" id="block-bank" aria-label="Sixteen repeated board blocks"></div>
+          <div class="block-detail" id="block-detail">2 self-attentions per block · head width 32 · 32 attention calls</div>
+        </div>
+        <div class="stage">
+          <div class="stage-label">Once</div>
+          <div class="node exchange"><strong>Gather</strong><small>board → registers</small></div>
+        </div>
+        <div class="stage">
+          <div class="stage-label">Heads</div>
+          <div class="node output"><strong>Spatial</strong><small>ownership · budget · policy</small></div>
+          <div class="node output"><strong>Global</strong><small>WDL · score · pass</small></div>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="comparison-title">
+      <div class="comparison-head">
+        <h2 id="comparison-title">Matched-budget comparison</h2>
+        <span>Depth and bottleneck move; symmetry, m, registers, heads, and block structure do not.</span>
+      </div>
+      <div class="compare-labels" aria-hidden="true">
+        <span>Model</span><span>Blocks L</span><span>Bottleneck n</span><span>Trunk parameters</span>
+      </div>
+      <div id="comparison-rows"></div>
+      <div class="constants">
+        <span><strong>Stem</strong> scalar 1×1 maps, then one D4 lift · 2,288 params</span>
+        <span><strong>D4</strong> G=8</span>
+        <span><strong>Register path</strong> 2 × 64, attention 32</span>
+        <span><strong>Board block</strong> plain, two attentions</span>
+        <span><strong>Compute proxy</strong> L × n varies despite matched parameters</span>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      "use strict";
+      var root = document.getElementById("depth-width-app");
+      var select = document.getElementById("model-select");
+      var target = 5405426;
+      var specs = {
+        "narrow-deep": { n: 40, blocks: 33, params: 5407669 },
+        "balanced": { n: 64, blocks: 16, params: 5405426 },
+        "wide-shallow": { n: 128, blocks: 5, params: 5398737 }
+      };
+
+      function signedPercent(value) {
+        var percent = 100 * (value - target) / target;
+        if (Math.abs(percent) < 0.0005) return "0.000%";
+        return (percent > 0 ? "+" : "") + percent.toFixed(3) + "%";
+      }
+
+      function renderRows(selected) {
+        var host = document.getElementById("comparison-rows");
+        host.innerHTML = "";
+        Object.keys(specs).forEach(function (name) {
+          var spec = specs[name];
+          var row = document.createElement("button");
+          row.type = "button";
+          row.className = "compare-row" + (name === selected ? " is-selected" : "");
+          row.setAttribute("data-model", name);
+          row.setAttribute("aria-pressed", name === selected ? "true" : "false");
+          row.innerHTML =
+            "<span><strong>" + name + "</strong><small>" + (2 * spec.blocks) + " attention calls · L×n " + (spec.blocks * spec.n) + "</small></span>" +
+            "<span class=\"measure\"><span class=\"measure-value\">" + spec.blocks + "</span><span class=\"track\"><span class=\"fill depth-fill\" style=\"--fill:" + (100 * spec.blocks / 33).toFixed(1) + "%\"></span></span></span>" +
+            "<span class=\"measure\"><span class=\"measure-value\">" + spec.n + "</span><span class=\"track\"><span class=\"fill width-fill\" style=\"--fill:" + (100 * spec.n / 128).toFixed(1) + "%\"></span></span></span>" +
+            "<span class=\"param\"><strong>" + spec.params.toLocaleString("en-US") + "</strong><small>" + signedPercent(spec.params) + " from target</small></span>";
+          host.appendChild(row);
+        });
+      }
+
+      function render(name) {
+        var spec = specs[name];
+        document.getElementById("selected-drift").textContent = signedPercent(spec.params);
+        document.getElementById("block-title").textContent = spec.blocks + " plain blocks";
+        document.getElementById("block-shape").textContent = "128 → " + spec.n + " → 128";
+        document.getElementById("block-detail").textContent =
+          "2 self-attentions per block · head width " + (spec.n / 2) + " · " + (2 * spec.blocks) + " attention calls";
+
+        var bank = document.getElementById("block-bank");
+        bank.setAttribute("aria-label", spec.blocks + " repeated board blocks");
+        bank.innerHTML = "";
+        for (var index = 1; index <= spec.blocks; index += 1) {
+          var mark = document.createElement("span");
+          mark.className = "block-mark";
+          mark.setAttribute("data-index", String(index));
+          bank.appendChild(mark);
+        }
+        renderRows(name);
+      }
+
+      select.addEventListener("change", function () { render(select.value); });
+      root.addEventListener("click", function (event) {
+        var row = event.target.closest("button[data-model]");
+        if (!row) return;
+        select.value = row.getAttribute("data-model");
+        render(select.value);
+      });
+
+      render(select.value);
+    }());
+  </script>
+</body>
+</html>

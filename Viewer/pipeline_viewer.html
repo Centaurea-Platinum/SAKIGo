@@ -173,7 +173,7 @@ const NODES = [
     outputs:["policy (N*N+1)", "ownership (N*N)", "rootInfo: rawWinrate / rawLead / rawDrawProb / rawNoResultProb"],
     inv:["reportAnalysisWinratesAs = BLACK — every value must be converted to current-player perspective downstream"] },
   { lane:"gen", id:"generator", t:"Phase 1 generator", s:"Training/generate_katago_phase1.py",
-    role:"Self-plays games with its own Python rules (Game), queries KataGo per position, converts targets to the current player's perspective, samples the next move from the budget distribution.",
+    role:"Generates teacher-policy rollouts, queries KataGo per position, converts targets to the current player's perspective, and samples the next move from the teacher distribution.",
     inputs:["ruleset/board/komi plan (GenerationPlan quotas)", "KataGo responses"],
     outputs:["schema-v1 records", "status.json (atomic writes)", "SGF-style move lists"],
     inv:["WDL length 4: win/draw/loss/no-result, current player", "score & ownership sign-flipped for White to move; score / board area",
@@ -195,12 +195,12 @@ const NODES = [
     inputs:["shards + metadata"], outputs:["ruleset-balanced record batches per split"],
     inv:["val sampling (advance=false) never consumes the training stream", "each record seen ~once per pass"] },
   { lane:"train", id:"loader", t:"Dataset + DataLoader", s:"StreamingRulesetAwareBatchDataset",
-    role:"Infinite IterableDataset yielding ruleset-balanced batches; optional per-sample D4 augmentation for non-equivariant control models. collate_cpu numpy-stacks; DataLoader pins train batches.",
+    role:"Infinite IterableDataset yielding ruleset-balanced batches; optional per-sample D4 augmentation. collate_cpu numpy-stacks; DataLoader pins train batches.",
     inputs:["streaming buffer"], outputs:["CPU batches: board, rules, targets, masks"],
     inv:["D4 augmentation transforms every board-shaped field and never the pass entry or globals",
          "train H2D copies are async; PinnedBatchKeeper holds pinned buffers until a CUDA event confirms the copy; eval collate is synchronous & unpinned"] },
   { lane:"train", id:"model", t:"SakiGoModel", s:"Model/sakigo_model/",
-    role:"D4-equivariant attention trunk: regular-rep board/register fibers, equivariant QKV + channel mixing, canonical-frame RoPE, register gather/broadcast on configured blocks. ScalarSakiGoModel is the non-equivariant control.",
+    role:"D4-equivariant attention trunk: rules initialize registers, one broadcast conditions the board, plain equivariant board blocks apply canonical-frame RoPE attention, and one final gather feeds global heads.",
     inputs:["board planes 6·N², rule features 10"],
     outputs:["policy & budget logits (N²+1)", "wdl logits (4)", "score", "ownership logits (N²)"],
     inv:["spatial heads equivariant, global heads invariant", "raw logits in training — legality masking is inference-only",
@@ -220,7 +220,7 @@ const NODES = [
     inv:["capture counts must NEVER enter a repetition hash — every cycle strictly increases them",
          "single-stone suicide always illegal (matches generator since 2026-07-06)",
          "PyO3 binding parked in src/python.rs pending network"] },
-  { lane:"eval", id:"selfplay", t:"Self-play eval", s:"Training/selfplay_eval.py",
+  { lane:"eval", id:"selfplay", t:"Paired policy eval", s:"sakigo/eval/",
     role:"Paired color-reversed matches between checkpoint policies (or a random baseline): shared seeded openings, Tromp-Taylor adjudication at two passes or ply cap, Elo ± Wilson CI, SGF dumps.",
     inputs:["two players (checkpoints / random)"], outputs:["games.jsonl, summary.json, SGFs"],
     inv:["strength claims come from paired games, NOT val loss (val loss has anti-correlated with strength here)"] },
@@ -338,7 +338,7 @@ function renderRecord() {
   tg.innerHTML = "<h2>Targets (current-player perspective)</h2>";
   const row2 = document.createElement("div"); row2.className = "boards";
   const maxB = Math.max(...r.budget.slice(0, area), r.budget[area], 1e-9);
-  row2.appendChild(boardBlock("budget (search prior)",
+  row2.appendChild(boardBlock("budget (teacher policy)",
     drawGrid(n, i => heat(r.budget[i] / maxB)), `pass = ${(r.budget[area]).toFixed(4)}`));
   row2.appendChild(boardBlock("policy (top-1)",
     drawGrid(n, i => heat(r.policy[i])), `pass = ${(r.policy[area]).toFixed(1)}`));

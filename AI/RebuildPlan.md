@@ -75,7 +75,7 @@ tests/        # ported regression suites + golden-vector cross-tests
 
 **P6 — Cutover**: old `Training/`+`Model/` deleted only after P1–P5 gates; update READMEs/Design pointers (ask before touching non-AI files), AI/Context.md map.
 
-**P7 — Search/self-play (outlook, not this rebuild)**: search + player interfaces, replay/target generation, subtree harvest (D11/D12/D16) — only on top of the rebuilt stack and the D10-vs-Target.md reconciliation.
+**P7 — Search/self-play (not currently considered):** retained only as historical outlook; it is outside the current external KataGo-distillation scope.
 
 ### External review reconciliation (2026-07-06)
 

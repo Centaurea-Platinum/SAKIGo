@@ -4,7 +4,7 @@ Long-term memory for AI collaborators. Read this before acting, then update it w
 
 ## What SAKIGo is
 
-SAKI currently stands for **SymmetryAwareKatago-DistillationImplementation**. SAKIGo is the Go AI project built around that direction: KataGo-style neural network plus search, with selectable scoring / ko / suicide rules at inference instead of a single baked-in ruleset.
+SAKI currently stands for **SymmetryAwareKatago-DistillationImplementation**. The current project scope is external KataGo-teacher distillation: generate teacher targets, train the student network, and evaluate distilled checkpoints.
 
 ## Current phase
 
@@ -15,23 +15,23 @@ The repo is no longer design-only. It now has:
 - `equivariant_attention/`: reusable torch-only finite-group regular-representation attention library extracted from the SAKIGo model code; SAKIGo consumes it through compatibility wrappers.
 - `sakigo/`: the rebuilt Python stack (2026-07-06 rebuild, see [RebuildPlan.md](RebuildPlan.md)) — model, data, train, generate, eval, engine subpackages plus [CONTRACTS.md](../sakigo/CONTRACTS.md).
 - `Distillation/`: local KataGo teacher assets; downloaded engines/models are artifacts, not source.
-- `Training/data`, `Training/runs`: pre-rebuild datasets and checkpoints (legacy code deleted at the P6 cutover; checkpoints still load via `sakigo.model.remap_legacy_scalar_state_dict`).
+- `Training/data`, `Training/runs`: pre-rebuild artifacts retained for reference; current model checkpoints are not required to remain compatible during the move-quick phase.
 
-Search, non-area final scoring/adjudication, self-play training, and exact KataGo teacher projection are still not implemented.
+Search, self-play training, feature/time auxiliary heads, and high-visit Phase 2 are explicitly not considered in the current scope. Core inputs, model architecture, output heads, and engine support remain active because they serve distillation.
 
 ## Implementation map
 
 - [Engine/README.md](../Engine/README.md) - Rust rules/encoding engine. Owns board topology, captures, suicide, ko/superko, history-aware cache hashes, feature encoding, combined model inputs/legal mask, and area scoring. Python binding: build with `uvx maturin build --manifest-path Engine/Cargo.toml --release --features python --out dist`, then install the wheel.
 - [equivariant_attention/](../equivariant_attention) - reusable finite-group equivariant attention package. Provides `FiniteGroupSpec`, trivial/Cn/D4 square-grid presets, regular-representation linear/norm/MLP layers, invariant pooling, spatial self-attention, and spatial/register cross-attention. Tensor shapes: spatial `[B,C,G,H,W]`, registers `[B,R,C,G]`.
-- [sakigo/CONTRACTS.md](../sakigo/CONTRACTS.md) - versioned contracts: strict record schema v1, canonical prepared split v2, checkpoint schema v3, model/loss semantics, and run-dir layout.
-- `sakigo/model/` - unified `SakiGoNet` with `group_size ∈ {1, 8}` (scalar control = 1); no forward-time caches (torch.compile-clean); model specs live as packaged JSON in `sakigo/model/specs/`. The D4 attention primitives are compatibility wrappers over `equivariant_attention`; register width can now differ from trunk width.
+- [sakigo/CONTRACTS.md](../sakigo/CONTRACTS.md) - versioned contracts: strict record schema v1, canonical prepared split v2, checkpoint schema v5, model/loss semantics, and run-dir layout.
+- `sakigo/model/` - D4-only `SakiGoNet` with no forward-time caches (torch.compile-clean). A scalar pointwise `6 -> 16 -> 128` board stem runs before one D4 lift. The fixed trunk is one register-to-board broadcast, `L` plain two-attention board blocks, and one board-to-register gather. Board self-attention uses fused QKV regular projections; register cross-attention uses separate Q plus fused KV. The packaged sweep fixes `m = 128`, register widths, heads, and a roughly 5.405M trunk budget while comparing `n/L = 40/33`, `64/16`, and `128/5`.
 - `sakigo/data/` - strict record validation, canonical model-input split, JSONL(.zst) → immutable-generation mmap shards with atomic manifest switch, a stateful balanced sampler, and checkpointable D4 augmentation.
-- `sakigo/train/` - validated config, lazy torch.compile fallback, bf16/fused AdamW, failure status, and atomic safe checkpoints with global/sampler/augmentation RNG state for bit-exact `num_workers=0` resume; benchmark and suite entry points remain available.
+- `sakigo/train/` - validated config, `reduce-overhead` torch.compile by default with lazy fallback, bf16/fused AdamW, failure status, and atomic safe checkpoints with global/sampler/augmentation RNG state for bit-exact `num_workers=0` resume; benchmark and suite entry points remain available.
 - `sakigo/generate/` - Phase 1 KataGo generation with forced Black-perspective labels, owned/reaped subprocesses, response timeout, failure status, and atomic zstd shards with explicit overwrite semantics.
 - `sakigo/eval/` - safe checkpoint loading, paired color-reversed policy matches, engine-owned area scoring, honest draw/void outcomes, paired uncertainty, and JSONL/SGF dumps.
 - [pyproject.toml](../pyproject.toml) - Python 3.12, CUDA PyTorch `2.11.0+cu128`, tensorboard, tqdm, triton-windows (torch.compile works on this machine).
 
-- [sakigo/model/specs/ModelSpecs.json](../sakigo/model/specs/ModelSpecs.json) - packaged `non-bottleneck`, `plain`, `swiglu`, and directly trainable `scalar-control` specs.
+- [sakigo/model/specs/ModelSpecs.json](../sakigo/model/specs/ModelSpecs.json) - packaged `narrow-deep`, default `balanced`, and `wide-shallow` D4 depth/width sweep.
 
 ## Boundary
 
@@ -53,13 +53,13 @@ Keep the AI notes current without waiting to be prompted: when code, design docs
 
 **Input - how a position is encoded**
 - [BoardInput.md](../Design/Input/BoardInput.md) - six board planes: MyStones, OpponentStones, EmptyPositions, BoundaryCorner, BoundaryEdge, NonTrivialIllegal.
-- [NonBoardInput.md](../Design/Input/NonBoardInput.md) - rule one-hots plus normalized komi and capture-difference scalars. The rule MLP directly initializes register tokens; FiLM is optional future plumbing.
+- [NonBoardInput.md](../Design/Input/NonBoardInput.md) - rule one-hots plus normalized komi and capture-difference scalars. The rule MLP directly initializes two registers, which broadcast once before the board blocks.
 - [Markov.md](../Design/Input/Markov.md) - the neural input is lossy, but the engine keeps history/hash state and exposes legality through encoding.
 
 **Architecture - the network**
-- [Stem.md](../Design/Architecture/Stem.md) - small D4 group-equivariant stem using regular representations.
+- [Stem.md](../Design/Architecture/Stem.md) - scalar pointwise board stem followed by one late D4 lift.
 - [EquivariantAttention.md](../Design/Architecture/EquivariantAttention.md) - left-regular feature convention, canonical-frame positional embedding, equivariant QKV/channel mixing, and shared pointwise nonlinearities.
-- [Trunk.md](../Design/Architecture/Trunk.md) - D4-equivariant spatial attention in nested residual blocks plus register-token attention.
+- [Trunk.md](../Design/Architecture/Trunk.md) - fixed D4 program: one initial broadcast, `L` plain two-attention board blocks, and one final gather.
 - [Heads.md](../Design/Architecture/Heads.md) - spatial heads use 1x1 convs over board features; global heads use MLPs over register tokens.
 
 **Output - the heads**
@@ -67,21 +67,17 @@ Keep the AI notes current without waiting to be prompted: when code, design docs
 - [Winrate.md](../Design/Output/Winrate.md) - length-4 win/draw/loss/no-result output.
 - [Score.md](../Design/Output/Score.md) - scalar score divided by board area first; percentile heads later.
 - [Ownership.md](../Design/Output/Ownership.md) - end-of-game ownership.
-- [Policy+Budget.md](../Design/Output/Policy+Budget.md) - policy and budget are separate targets; pass is the final logit in the shared `N*N + 1` action vector. Current design says train without masking illegal moves and mask them only as an inference precaution.
-- [Auxiliary.md](../Design/Output/Auxiliary.md) - auxiliary heads predict future main-head values.
+- [Policy+Budget.md](../Design/Output/Policy+Budget.md) - current distillation mapping: budget learns KataGo's raw policy and policy learns teacher top-1; pass is the final logit.
+- [FeatureAuxiliary.md](../Design/Output/FeatureAuxiliary.md) and [TimeAuxiliary.md](../Design/Output/TimeAuxiliary.md) - **not currently considered**.
 
 **Pipeline**
 - [Design/Engine/Scope.md](../Design/Engine/Scope.md) - engine performs the lossy projection and handles history through hashing.
-- `Design/Search/` - currently only contains the Gumbel MuZero / policy-improvement-by-planning PDF reference; no SAKIGo search spec yet.
-- [SearchBasedStudentTeacher.md](../Design/Train/SearchBasedStudentTeacher.md) - self-play framing: student distills net+search results/statistics.
-- [SubTreeHarvest.md](../Design/Train/SubTreeHarvest.md) - train interior search-tree nodes in addition to the root.
-- [BestMoveVisit.md](../Design/Train/BestMoveVisit.md) - harvest cutoff keyed on best-move visits.
-- [BranchedGames.md](../Design/Train/BranchedGames.md) - possible branching in high-policy-entropy positions.
-- [Design/Distillation/Target.md](../Design/Distillation/Target.md) - phase sketch: phase 1 distills a 1-visit teacher net, mapping KataGo raw policy to budget and top-1 to policy; phase 2 fine-tunes on high-visit data. Reconcile this external-teacher bootstrap with the older self-play-only D10 framing before treating training as settled.
+- `Design/Search/` and `Design/Train/` - **not currently considered**; retained only as future reference.
+- [Design/Distillation/Target.md](../Design/Distillation/Target.md) - active Phase 1 contract: distill a one-visit external KataGo teacher, mapping raw policy to budget and top-1 to policy. High-visit Phase 2 is not currently considered.
 
 ## Glossary
 
-- **FiLM** - Feature-wise Linear Modulation, an optional future per-channel bias/scale add-on for rule conditioning.
-- **Budget head** - predicts per-move search allocation / search prior, distinct from the policy head.
+- **Budget head** - current distillation target for KataGo's raw policy distribution; no search-time role is assumed in the current scope.
+- **Bottleneck width (`n`)** - working channel count inside each board block; the packaged sweep trades it against block count at fixed `m = 128` and nearly fixed trunk parameters.
 - **Regular representation** - D4 feature layout with one component for each of the 8 board symmetries.
 - **Register tokens** - global tokens shaped as regular features in the main model; they are equivariant, not merely invariant.

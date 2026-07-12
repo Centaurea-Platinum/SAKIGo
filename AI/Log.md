@@ -2,23 +2,52 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
-## 2026-07-11 - Architecture hardening fixes implemented
+## 2026-07-12 - Board stem moved before the D4 lift
 
-- Hardened generation startup, shutdown, and output publication: native-engine availability and numeric configuration are validated before work starts; KataGo analysis is pinned to Black's perspective; startup failures reap child processes; response waits time out; failed runs record their error; and shards are written privately then atomically published. Existing generation output now requires an explicit overwrite flag.
-- Tightened the data boundary around schema-v1 records: rulesets are required, komi must be finite, legal masks must be JSON booleans with legal pass, policy targets must be one-hot and legal, and illegal budget mass is rejected. Dataset splits now hash the canonical model-visible position, while prepared datasets use immutable generation directories and atomically switch their manifest only after every array is flushed.
-- Made training continuation exact for the supported single-worker path by checkpointing sampler and augmentation RNG state, versioning checkpoints at schema 3, validating configuration centrally, saving scheduler state consistently, and falling back cleanly if lazy compilation fails. Training failures now close resources and leave a failed status with the originating error.
-- Corrected evaluation semantics: checkpoint loading is safe by default, unsafe legacy fallback is explicit, draws receive half a point, capped games are void rather than White wins, confidence intervals use color-reversed game pairs, and matrix evaluation rejects unsupported non-area scoring. Added a directly trainable `scalar-control` model spec.
-- Extended the Rust engine with history-sensitive state hashes, exact float32 komi hashing, combined model-input extraction in one legality scan, finite-komi validation, and canonical area scoring exposed to Python. Added a CI workflow that builds and installs the native wheel before running binding and Python tests, preventing native coverage from silently disappearing.
-- Verification on the project machine: `68 passed, 1 skipped` in Python (the skip is the intentionally absent legacy-checkpoint fixture); `19 passed` in Rust; Rust formatting and strict Clippy checks passed; Python source compilation passed; and the rebuilt native wheel was used by the full suite.
-- Remaining scope is intentional rather than a regression: full neural search/self-play training, true mid-run generation resume, and non-area/dead-stone adjudication are still future phases.
+- Replaced `lift -> regular 6 -> 16 -> 128` with scalar pointwise `6 -> 16 -> 128 -> lift`; the regular trunk and register path are unchanged.
+- Reduced stem parameters from 17,296 to 2,288 and theoretical dense stem MACs by 64x; all three matched trunk counts remain exact.
+- On the RTX 5070 Ti Laptop at 19x19, batch 8, BF16, and `reduce-overhead`, the isolated compiled stem improved from 0.249/0.477 ms forward/backward to 0.223/0.332 ms (24% combined). The sub-millisecond saving is below whole-model WDDM timing noise because the trunk dominates.
+- Added a collapsed-weight output/input-gradient equivalence gate and retained full-model D4 equivariance coverage.
+- Renamed the packaged stem shape to `scalar_lift_v1` and advanced checkpoint schema to 5 because stem and optimizer state shapes change.
 
-## 2026-07-10 - Read-only workspace evaluation recorded
+## 2026-07-12 - Attention projections fused
 
-- Audited the current post-cutover workspace across Rust engine/bindings, D4 model and reusable equivariant-attention library, data preparation/sampling, trainer/suite, KataGo generation, evaluation, tests, packaging, and AI/design documentation. Verdict: a strong early research platform with coherent contracts and module boundaries; not yet a complete Go AI because search, self-play training, and full adjudication remain absent.
-- Added verified implementation risks to [Issues.md](Issues.md): `StateHash` is not safe for future NN/TT caching because it omits PSK history and quantizes komi differently from the NN input; native binding/generator tests can silently skip; KataGo startup has a pre-`finally` orphan window; lazy `torch.compile` failures bypass the advertised fallback; resume does not restore sampler state; and eval needs draw-aware, pair-aware regression coverage.
-- Reconciled obsolete current-watchlist claims left by the cutover: PyO3 is active rather than parked, the generator now uses the Rust engine rather than a duplicate Python rules implementation, and training uses prepared mmap shards rather than the deleted streaming trainer. Updated stale links in the affected current issue entries while leaving historical log entries intact.
-- Verification on the Mac review mirror: clean worktree at `9fbe421`; Python source compilation passed for `sakigo/`, `equivariant_attention/`, and `tests/`; all TOML/JSON parsed; a rule-feature perspective smoke passed; `git diff --check` passed. Dynamic Python/Rust suites were not rerun because this clone intentionally lacks the project toolchains; latest recorded project-machine evidence remains 48 Python tests (2026-07-08) and 17 Rust tests (2026-07-06).
-- No production/design files changed; this session only updated durable notes under `AI/`.
+- Fused each board self-attention's Q/K/V regular maps into one projection and each register cross-attention's K/V maps into one projection; parameter slices, attention math, D4 tying, and model counts remain unchanged.
+- Documented the exact exchange semantics: gather takes Q from registers and K/V from the board, updating only registers; broadcast takes Q from the board and K/V from registers, updating only the board.
+- Bumped checkpoint schema to 4 because fused parameter keys and optimizer slots are not resume-compatible with schema 3.
+- Added projection equivalence/gradient/source tests and destination-only residual tests.
+
+## 2026-07-12 - Reduce-overhead compilation became the default
+
+- Set single-run and suite training defaults to `torch.compile(mode="reduce-overhead")`; explicit `off` and `default` modes remain available.
+- Kept two independent board self-attention operations per block as a fixed expressivity prior, not an active ablation axis.
+- Local 19x19 BF16 batch-8 benchmarking measured a 15.5% balanced-model forward/backward improvement over the previous default compile mode.
+
+## 2026-07-12 - Architecture reduced to a matched depth/width sweep
+
+- Replaced the general trunk program with the fixed sequence `broadcast -> block x L -> gather`; register exchange now occurs only once at each end and uses depth-independent residual-scale initialization.
+- Removed the active FiLM, SwiGLU, scalar-control, repeated-cycle, and arbitrary-layout machinery. Model-spec schema 5 exposes only `narrow-deep`, `balanced`, and `wide-shallow`.
+- Fixed `expanded_channel = 128` and a 5,405,426-parameter trunk target with 0.2% tolerance. The three `(bottleneck, blocks)` points are `(40, 33)`, `(64, 16)`, and `(128, 5)`.
+- Bumped checkpoint schema to 3 and reject pre-reduction model checkpoints explicitly.
+- Rebuilt the architecture comparison around the fixed pipeline and budget-matched tradeoff. Focused architecture/trainer/eval tests pass (`21 passed`); the full suite passes 58 tests and retains two unrelated data-state failures for missing sampler/augmentation checkpoint methods.
+
+## 2026-07-12 - Scope narrowed to external KataGo distillation
+
+- Marked search, self-play training, subtree/branching ideas, feature/time auxiliary heads, percentile score heads, and high-visit Phase 2 as not currently considered.
+- Kept the input/model architecture, engine projection, WDL, scalar score, ownership, policy, and budget because they directly support Phase 1 distillation.
+- Reframed budget as the soft KataGo-policy target and policy as teacher top-1, with no current search-time semantics.
+- Historical search/self-play notes remain for provenance but no longer direct current work.
+
+## 2026-07-12 - Register exchange became a spec-programmed module sequence
+
+- Added invariant register-conditioned delta FiLM to explicit `film_block` operations. The default uses four conditioned blocks at 1, 6, 11, and 16; each maps freshly gathered registers through `R*r -> register_bottleneck_channel -> 2*bottleneck_channel`, zero-initializes the final projection, and modulates only the normalized bottleneck delta before `f4`. Ordinary blocks own no FiLM parameters; the four FiLM modules add 33,664 parameters to `plain`.
+- Expanded `ModelArchitecture.md` into executable-style pseudocode with tensor shapes, derived attention dimensions, explicit GQA K/V sharing, RoPE and nonlinearity placement, register-cycle dataflow, checkpoint provenance, and a constrained initial tuning surface.
+- Split the fused trunk block into independent `BoardBlock`, `RegisterGather`, and `RegisterBroadcast` residual modules. `SakiGoNet` now executes an ordered operation sequence, so gather and broadcast may appear anywhere instead of being forced to read a block input and write its output.
+- Changed the packaged default to gather-first register cycles at blocks 1, 6, 11, and 16 (`gather -> broadcast -> film_block`) with ordinary blocks between them and a final gather for global heads.
+- Current parameter counts are: `non-bottleneck` 4,894,091; `plain` 6,215,947; `swiglu` 7,265,547; scalar control 826,171.
+- Replaced repeated schema-3 model definitions with schema 4: shared `model_defaults`, named `trunk_layouts`, and per-model overrides. `plain` is now an empty override; `swiglu`, `non-bottleneck`, and scalar control specify only their differences.
+- Rewrote the architecture documentation around modular pseudocode and recorded that old fused-block checkpoints are intentionally not a compatibility constraint.
+- Focused verification passed: model-spec, register-cycle ordering, active-FiLM equivariance, identity initialization, gradient, and trainer tests (`25 passed`), Ruff, and Python source compilation. The broader suite passes `66` tests with two data-state tests deselected; those two currently fail because separate working-tree edits remove the sampler/augmentation state methods they exercise.
 
 ## 2026-07-08 - Training suite/datapath hardening after stalled run
 

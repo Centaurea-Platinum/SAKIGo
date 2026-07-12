@@ -1,7 +1,7 @@
 """SAKIGo rebuilt Python stack.
 
 Modular packages:
-- sakigo.model: D4-equivariant network (group_size-parameterized).
+- sakigo.model: D4-equivariant network with a fixed register-exchange schedule.
 - sakigo.data: record schema, datasets, augmentation.
 - sakigo.train: trainer, losses, metrics, checkpoints.
 - sakigo.generate: KataGo phase-1 teacher data generation.

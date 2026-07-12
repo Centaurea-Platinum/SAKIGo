@@ -30,6 +30,14 @@ Tokens without a position (register tokens) receive no positional embedding and 
 
 QKV projections and channel mixing are linear maps applied to the concatenated vector `v`. To preserve equivariance, the weight matrix should not be arbitrary; it should reuse the same learned block weights across group components.
 
+The implementation may evaluate several independent maps in one larger regular
+linear operation. Board self-attention concatenates the Q, K, and V output
+channels into one fused QKV projection, then splits them before attention.
+Register cross-attention evaluates Q separately on the query stream and
+concatenates K and V into one fused projection on the key/value stream. This is
+only an execution/storage fusion: each slice retains independent weights, and
+the equivariant map and parameter count are unchanged.
+
 Equivalently, the full matrix is built from repeated block rows. If the first block row is:
     b = [B_e, B_{g_1}, B_{g_2}, ...]
 then the row for output component `h` is the same collection of blocks, but permuted according to `h^{-1}`:

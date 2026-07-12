@@ -6,7 +6,6 @@ Replaces the legacy ~30-flag argparse surface + vars(args)-in-checkpoint.
 from __future__ import annotations
 
 import argparse
-import math
 import tomllib
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
@@ -20,11 +19,11 @@ class TrainConfig:
     prepared_dir: str = ""
     seed: int = 0
     val_fraction: float = 0.05
-    num_workers: int = 0
+    num_workers: int = 2
     board_weights: dict[int, float] | None = None
     augment_d4: bool = False
     # model
-    model_spec: str = "plain"
+    model_spec: str = "balanced"
     # optimization
     steps: int = 1000
     batch_size: int = 64
@@ -35,11 +34,10 @@ class TrainConfig:
     warmup_steps: int = 100
     min_lr_ratio: float = 0.05
     amp: str = "auto"  # auto|off
-    compile: str = "default"  # off|default|reduce-overhead
+    compile: str = "reduce-overhead"  # off|default|reduce-overhead
     # loss weights
     wdl_weight: float = 1.0
     score_weight: float = 1.0
-    ownership_weight: float = 1.0
     policy_weight: float = 1.0
     budget_weight: float = 1.0
     # logging / checkpoints
@@ -67,54 +65,7 @@ def config_from_dict(raw: dict[str, Any]) -> TrainConfig:
         if key == "board_weights" and isinstance(value, dict):
             value = {int(k): float(v) for k, v in value.items()}
         kwargs[key] = value
-    config = TrainConfig(**kwargs)
-    validate_train_config(config)
-    return config
-
-
-def validate_train_config(config: TrainConfig) -> None:
-    if config.steps <= 0:
-        raise ValueError("steps must be positive")
-    if config.batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-    if config.num_workers < 0:
-        raise ValueError("num_workers must be non-negative")
-    if not 0.0 <= config.val_fraction < 1.0:
-        raise ValueError("val_fraction must be in [0, 1)")
-    if config.checkpoint_interval <= 0:
-        raise ValueError("checkpoint_interval must be positive")
-    if config.log_interval < 0:
-        raise ValueError("log_interval must be non-negative")
-    if config.val_batches < 0:
-        raise ValueError("val_batches must be non-negative")
-    if config.warmup_steps < 0:
-        raise ValueError("warmup_steps must be non-negative")
-    if config.compile not in {"off", "default", "reduce-overhead"}:
-        raise ValueError("compile must be off, default, or reduce-overhead")
-    if config.amp not in {"auto", "off"}:
-        raise ValueError("amp must be auto or off")
-    finite = {
-        "lr": config.lr,
-        "weight_decay": config.weight_decay,
-        "grad_clip": config.grad_clip,
-        "min_lr_ratio": config.min_lr_ratio,
-        "wdl_weight": config.wdl_weight,
-        "score_weight": config.score_weight,
-        "ownership_weight": config.ownership_weight,
-        "policy_weight": config.policy_weight,
-        "budget_weight": config.budget_weight,
-    }
-    for label, value in finite.items():
-        if not math.isfinite(value):
-            raise ValueError(f"{label} must be finite")
-    if config.lr <= 0.0:
-        raise ValueError("lr must be positive")
-    if config.weight_decay < 0.0 or config.grad_clip < 0.0:
-        raise ValueError("weight_decay and grad_clip must be non-negative")
-    if not 0.0 <= config.min_lr_ratio <= 1.0:
-        raise ValueError("min_lr_ratio must be in [0, 1]")
-    if any(value < 0.0 for key, value in finite.items() if key.endswith("_weight")):
-        raise ValueError("loss weights must be non-negative")
+    return TrainConfig(**kwargs)
 
 
 def load_toml_config(path: Path) -> TrainConfig:
@@ -176,6 +127,4 @@ def parse_args(argv: list[str] | None = None) -> TrainConfig:
             overrides[key] = tuple(value) if key == "data" else value
     if namespace.no_progress:
         overrides["progress"] = False
-    resolved = replace(config, **overrides)
-    validate_train_config(resolved)
-    return resolved
+    return replace(config, **overrides)

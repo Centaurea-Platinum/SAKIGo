@@ -23,6 +23,7 @@ import zstandard as zstd
 
 from sakigo.constants import (
     BOARD_PLANE_COUNT,
+    DISTILLATION_SCHEMA_VERSION,
     RULE_FEATURE_COUNT,
     SCHEMA_VERSION,
     WDL_LABELS,
@@ -233,7 +234,7 @@ def record_from_json(raw: Mapping[str, Any], path: Path | None = None, line_numb
         schema_version = int(raw["schema_version"])
     except KeyError as exc:
         raise ValueError(f"{label} is missing field {exc}") from exc
-    if schema_version != SCHEMA_VERSION:
+    if schema_version not in {SCHEMA_VERSION, DISTILLATION_SCHEMA_VERSION}:
         raise ValueError(f"{label} uses unsupported schema_version {schema_version}")
     if board_size <= 0:
         raise ValueError(f"{label} board_size must be positive")
@@ -263,10 +264,10 @@ def record_from_json(raw: Mapping[str, Any], path: Path | None = None, line_numb
     policy = _optional_distribution(targets, "policy", action_count)
     budget = _optional_distribution(targets, "budget", action_count)
     legal_mask = _optional_legal_mask(legal_source, action_count)
-    if policy is not None:
+    if schema_version == SCHEMA_VERSION and policy is not None:
         active = np.flatnonzero(policy > 1e-6)
         if len(active) != 1 or not np.isclose(float(policy[active[0]]), 1.0, atol=1e-6):
-            raise ValueError("policy must be a one-hot top-1 distribution")
+            raise ValueError("schema-v1 policy must be a one-hot top-1 distribution")
     if legal_mask is not None:
         illegal = ~legal_mask
         if policy is not None and float(policy[illegal].sum()) > 1e-6:

@@ -3,13 +3,13 @@
 Stable interfaces every module must honor. Changing anything here requires a
 deliberate schema-version bump and a migration note in AI/Decisions.md.
 
-## 1. Training record schema (v1, JSONL / .jsonl.zst)
+## 1. Training record schema (v1 and v2, JSONL / .jsonl.zst)
 
 One JSON object per line. Fields (targets may nest under `targets`):
 
 | Field | Type / shape | Notes |
 |---|---|---|
-| `schema_version` | int = 1 | |
+| `schema_version` | int = 1 or 2 | v2 permits equal-optimal soft policy targets |
 | `board_size` | int N | square boards only |
 | `ply` | int | |
 | `position_key` | str | sha1[:20] of moves + to_move |
@@ -19,14 +19,20 @@ One JSON object per line. Fields (targets may nest under `targets`):
 | `wdl` | float[4] | win/draw/loss/no_result, **mover perspective** |
 | `score` | float | mover-perspective lead **÷ board area** |
 | `ownership` | float[N²] ∈ [−1,1] | mover perspective (+1 = mine) |
-| `policy` | float[N²+1] | one-hot teacher top-1; **pass = last index** |
+| `policy` | float[N²+1] | teacher-optimal distribution; **pass = last index** |
 | `budget` | float[N²+1] | full teacher policy renormalized over legal moves |
 | `legal_mask` | bool[N²+1] | JSON booleans only; pass last and always true |
 | `source` | object | provenance, not consumed by training |
 
 Every target is optional per record; absent targets get mask=False in batches.
-`policy` is strictly one-hot and both action targets must assign zero mass to
-actions rejected by `legal_mask`.
+Schema v1 retains the original strictly one-hot policy invariant. Schema v2 is
+used by book distillation: policy is one-hot for continuation records and
+uniform across rounded-equal optimal book moves. Both action targets must
+assign zero mass to actions rejected by `legal_mask`.
+
+Migration: v1 readers remain valid for legacy generated data. Readers that
+consume the 9×9 book dataset must accept v2 distributions; all other fields and
+batch layouts are unchanged.
 
 ## 2. Board planes (index order)
 
@@ -52,18 +58,17 @@ Source of truth: `sakigo/rulesets.py` `RulesetSpec.rule_features` + `validate_ru
 |---|---|
 | `wdl_logits` | [B, 4] |
 | `score` | [B, 1] |
-| `ownership_logits` | [B, N²] |
 | `policy_logits` | [B, N²+1] |
 | `budget_logits` | [B, N²+1] |
 
-Row-major cells; pass logit is index N² (last). Ownership convention: logit ≥ 0 ⇔ mine.
+Row-major cells; pass logit is index N² (last).
 Training does not mask illegal moves; masking is an inference-time precaution only.
 
 ## 5. Loss semantics
 
 Per-head masks; averaging by `mask.float().sum().clamp_min(1.0)` (branchless).
 wdl/policy/budget: soft cross-entropy vs distributions. score: smooth-L1.
-ownership: BCE-with-logits on (t+1)/2. Total = Σ weight_h · loss_h.
+Total = Σ weight_h · loss_h.
 
 ## 6. Train/val split
 
@@ -80,10 +85,14 @@ the same split.
 `model_state`, `optimizer_state`, `scheduler_state`, `step`,
 `model_config` (plain dict), `run_config` (plain dict),
 `rng` (python/torch/cuda states), `sampler_state`,
-`augmentation_state`, `sampler_state_exact`, `schema_version` (=3).
+`augmentation_state`, `sampler_state_exact`, `checkpoint_schema_version` (=6).
 Written atomically (tmp + rename) as `checkpoints/step_%06d.pt`.
 Exact batch-order resume requires checkpoints produced with `num_workers=0`;
 the trainer rejects non-exact prefetched sampler states.
+
+Schema 6 removes the ownership head from schema 5's scalar-stem,
+fused-projection model. Earlier model and optimizer states are intentionally
+rejected rather than partially migrated.
 
 ## 8. Run directory layout
 

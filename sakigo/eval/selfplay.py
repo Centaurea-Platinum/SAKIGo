@@ -21,7 +21,7 @@ from pathlib import Path
 import torch
 
 from sakigo.engine import ENGINE_AVAILABLE, Game
-from sakigo.model import SakiGoNet, config_from_dict, remap_legacy_scalar_state_dict
+from sakigo.model import CHECKPOINT_SCHEMA_VERSION, SakiGoNet, config_from_dict
 from sakigo.rulesets import ruleset_from_name
 
 BLACK = 1
@@ -144,15 +144,16 @@ def load_policy_model(
                 "--allow-unsafe-legacy-checkpoint"
             ) from error
         payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    version = payload.get("checkpoint_schema_version")
+    if version != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError(
+            f"checkpoint schema {version!r} is incompatible; expected "
+            f"{CHECKPOINT_SCHEMA_VERSION} for the book-only no-ownership model"
+        )
     config = config_from_dict(payload["model_config"])
     state = payload.get("model_state", payload.get("model"))
     if state is None:
         raise ValueError(f"{checkpoint_path} has no model weights")
-    if config.group_size == 1 and any(
-        value.ndim == 2 and key.endswith(".weight") and not key.startswith("rule_mlp.")
-        for key, value in state.items()
-    ):
-        state = remap_legacy_scalar_state_dict(state)
     model = SakiGoNet(config).to(device)
     model.load_state_dict(state)
     model.eval()

@@ -61,11 +61,11 @@ not to perform ceremony.
       transposed openings or duplicated positions leaking across splits.
 - [ ] Are targets normalized and masked consistently: WDL distribution, score,
       ownership, policy, budget, legal mask, and pass entry?
-- [ ] Is the policy-vs-budget split preserved? Budget should remain the smooth
-      search-prior target; policy may be sharper only when that is the intended
-      auxiliary signal.
+- [ ] Is the current distillation mapping preserved? Budget matches the smooth
+      KataGo policy distribution; policy matches the teacher's top-1 move.
 - [ ] Is illegal-move masking applied only at the intended layer? Current design
-      says raw model logits during training, inference/search mask later.
+      uses raw model logits during training; checkpoint-policy evaluation may
+      apply the engine's legal mask.
 - [ ] Are D4 transforms applied to every board-shaped field and not to global
       fields or pass logits?
 - [ ] Does validation measure the live model, not stale cached weights or a

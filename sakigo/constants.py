@@ -6,10 +6,11 @@ Ported unchanged from Training/common.py (values are part of the data contract).
 from __future__ import annotations
 
 SCHEMA_VERSION = 1
+DISTILLATION_SCHEMA_VERSION = 2
 BOARD_PLANE_COUNT = 6
 RULE_FEATURE_COUNT = 10
 WDL_LABELS = ("win", "draw", "loss", "no_result")
-HEADS = ("wdl", "score", "ownership", "policy", "budget")
+HEADS = ("wdl", "score", "policy", "budget")
 ACTION_HEADS = ("policy", "budget")
 
 # Board planes, in order (perspective = side to move):

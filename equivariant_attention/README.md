@@ -64,10 +64,10 @@ post = RegularPointwiseMLP(
 y = post(attn(pre(x)))  # x/y: [B, 32, 8, 19, 19]
 ```
 
-Head and stem shapes can use full pointwise MLP tuples in the same style:
+Regular-domain head and post-processing shapes can use full pointwise MLP
+tuples in the same style:
 
 ```python
-stem_channels = (6, 16, trunk["expanded_channel"])
 spatial_head = (
     trunk["expanded_channel"],
     trunk["expanded_channel"],

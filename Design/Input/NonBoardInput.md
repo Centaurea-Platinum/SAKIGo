@@ -1,23 +1,42 @@
-Go's ruleset is very complicated. Furthermore, it does not map neatly to a hypercube, as some rules naturally excludes others. Thus, only a subset of rules are used to avoid overhead and rare sampling, and a one-hot encoding for correlated rules are used.
-The actual structure of a single one-hot will be something like [1,0,0], [0,1,0], or [0,0,1], but for simplicity, I will be recording them as an enumeration(1,2,3).
-The one-hot vectors are concatenated with normalized scalar inputs. They directly initialize register tokens through an MLP by default. FiLM bias/scale injection may be added later if needed. Specific implementation:
-    Feed into MLP(s) to initialize register tokens directly
-    Feed into two MLP for each FiLM(bias+scale) injection site.
+# Non-Board Input
 
-Scoring:
-    (1) Area
-    (2) Area + AncientChinese   #Penalized 2 points for each unconnected piece of alive group
-    (3) Territory
-    (4) TerritoryWithSekiScore  #Stones in seki do not have territory points in tournament rulesets like japanese rules, but its trivial to add them
+The model receives ten non-board rule features. Mutually exclusive rules use
+one-hot groups; komi and capture difference use normalized scalars. This avoids
+turning global rules into board-sized planes or sampling a meaningless full
+hypercube of rule combinations.
 
-Ko:
-    (1) SimpleKo    #long repeat = draw
-    (2) PositionalSuperKo   #Board move cannot revert to any previous board position
+The ten features are:
 
-Suicide:
-    (1) Yes
-    (2) No
+| Group | Encoding |
+|---|---|
+| Scoring | one-hot: Area, Area + Ancient Chinese group tax, Territory, Territory with seki scoring |
+| Ko | one-hot: Simple Ko, Positional Superko |
+| Suicide | one-hot: allowed, forbidden |
+| Komi | scalar normalized by board area |
+| Captured stones | scalar normalized by board area |
 
-Komi + CapturedStones: 
-    #This is two scalars in [-1,1], normalized via division board area. CapturedStones=(#opponent stones I captured - #my stones opponent captured)
-    #Handicap related rules are handled by komi value implicitly
+Captured stones is measured from the side-to-move perspective:
+
+```text
+opponent stones I captured - my stones the opponent captured
+```
+
+Handicap-related rule effects are represented through komi. The two scalars use
+the model contract's normalized `[-1, 1]` range.
+
+## Register Initialization
+
+The feature vector directly initializes the register tokens:
+
+```python
+registers = mlp_10_32_128(rule_features)
+registers = reshape(registers, [B, 2, 64, 1])
+registers = expand(registers, group=8)
+```
+
+The final MLP bias provides the rule-independent component, so there is no
+separate learned register seed. The registers broadcast into the board once at
+the beginning of the trunk. After all board blocks, one gather updates the
+registers from the final board representation for global and pass heads.
+
+There is no FiLM path or repeated rule injection inside the board blocks.

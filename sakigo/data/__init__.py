@@ -16,8 +16,6 @@ from sakigo.data.records import (
     iter_records,
     open_jsonl_text,
     record_from_json,
-    canonical_position_key,
-    split_for_record,
     split_for_position,
 )
 
@@ -39,7 +37,5 @@ __all__ = [
     "open_jsonl_text",
     "prepare_tensor_shards",
     "record_from_json",
-    "canonical_position_key",
-    "split_for_record",
     "split_for_position",
 ]

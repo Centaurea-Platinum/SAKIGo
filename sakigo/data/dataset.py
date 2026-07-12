@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler, get_worker_info
 
-from sakigo.data.prepare import PREPARE_FORMAT_VERSION, load_manifest
+from sakigo.data.prepare import load_manifest
 from sakigo.data.records import _d4_transform_planes
 
 _ARRAY_NAMES = (
@@ -69,11 +69,6 @@ class PreparedDataset(Dataset[dict[str, np.ndarray]]):
 
     def __init__(self, prepared_dir: Path, split: str, augment_d4: bool = False) -> None:
         manifest = load_manifest(prepared_dir)
-        if manifest.get("prepare_format_version") != PREPARE_FORMAT_VERSION:
-            raise ValueError(
-                f"prepared data uses format {manifest.get('prepare_format_version')!r}; "
-                f"rebuild it with format {PREPARE_FORMAT_VERSION}"
-            )
         self.split = split
         self.augment_d4 = augment_d4
         self.ruleset_keys: list[str] = list(manifest["ruleset_keys"])
@@ -267,7 +262,9 @@ class RulesetBalancedBatchSampler(Sampler[list[int]]):
             if key not in self._pools or not isinstance(raw_values, (tuple, list)):
                 raise ValueError(f"sampler state does not match prepared data for {key}")
             values = [int(value) for value in raw_values]
-            if len(values) != len(set(values)) or not set(values).issubset(set(self._pools[key])):
+            if len(values) != len(set(values)) or not set(values).issubset(
+                set(self._pools[key])
+            ):
                 raise ValueError(f"sampler queue contains an unknown index for {key}")
             queues[key] = values
         self._queues = queues

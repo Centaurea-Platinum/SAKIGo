@@ -222,7 +222,27 @@ def _tokens_to_fibers(x: torch.Tensor) -> torch.Tensor:
     return x.permute(0, 3, 2, 4, 1).reshape(batch, registers, heads * head_dim, group)
 
 
+def _split_regular_channels(
+    x: torch.Tensor,
+    sizes: tuple[int, ...],
+) -> tuple[torch.Tensor, ...]:
+    if x.dim() == 5:
+        channel_dim = 1
+    elif x.dim() == 4:
+        channel_dim = 2
+    else:
+        raise ValueError("regular features must be spatial [B,C,G,H,W] or fiber [B,R,C,G]")
+    return torch.split(x, sizes, dim=channel_dim)
+
+
 class RegularCrossAttention(nn.Module):
+    """Regular-representation grouped-query attention.
+
+    Cross-attention keeps its query projection separate and fuses the K/V
+    projections because keys and values share one source tensor. Self-attention
+    additionally fuses Q with K/V into one projection.
+    """
+
     def __init__(
         self,
         query_channels: int,
@@ -237,6 +257,7 @@ class RegularCrossAttention(nn.Module):
         global_rope_frequencies: tuple[float, ...],
         local_rope_frequencies: tuple[float, ...],
         group: FiniteGroupSpec | int | None = None,
+        fuse_qkv: bool = False,
     ) -> None:
         super().__init__()
         if q_heads % kv_heads != 0:
@@ -251,11 +272,22 @@ class RegularCrossAttention(nn.Module):
         self.key_is_spatial = key_is_spatial
         self.global_rope_frequencies = global_rope_frequencies
         self.local_rope_frequencies = local_rope_frequencies
+        self.q_channels = q_heads * head_dim
+        self.kv_channels = kv_heads * head_dim
+        self.fuse_qkv = fuse_qkv
 
-        self.q_proj = RegularLinear1x1(query_channels, q_heads * head_dim, self.group)
-        self.k_proj = RegularLinear1x1(key_channels, kv_heads * head_dim, self.group)
-        self.v_proj = RegularLinear1x1(key_channels, kv_heads * head_dim, self.group)
-        self.out_proj = RegularLinear1x1(q_heads * head_dim, output_channels, self.group)
+        if fuse_qkv:
+            if query_channels != key_channels or query_is_spatial != key_is_spatial:
+                raise ValueError("fused QKV requires query and key/value to share shape and source")
+            self.qkv_proj = RegularLinear1x1(
+                query_channels,
+                self.q_channels + 2 * self.kv_channels,
+                self.group,
+            )
+        else:
+            self.q_proj = RegularLinear1x1(query_channels, self.q_channels, self.group)
+            self.kv_proj = RegularLinear1x1(key_channels, 2 * self.kv_channels, self.group)
+        self.out_proj = RegularLinear1x1(self.q_channels, output_channels, self.group)
 
     def _to_tokens(self, x: torch.Tensor, heads: int, is_spatial: bool) -> torch.Tensor:
         if is_spatial:
@@ -276,9 +308,19 @@ class RegularCrossAttention(nn.Module):
         return height
 
     def forward(self, query: torch.Tensor, key_value: torch.Tensor) -> torch.Tensor:
-        q_proj = self.q_proj(query)
-        k_proj = self.k_proj(key_value)
-        v_proj = self.v_proj(key_value)
+        if self.fuse_qkv:
+            if query is not key_value:
+                raise ValueError("fused self-attention requires one shared QKV input tensor")
+            q_proj, k_proj, v_proj = _split_regular_channels(
+                self.qkv_proj(query),
+                (self.q_channels, self.kv_channels, self.kv_channels),
+            )
+        else:
+            q_proj = self.q_proj(query)
+            k_proj, v_proj = _split_regular_channels(
+                self.kv_proj(key_value),
+                (self.kv_channels, self.kv_channels),
+            )
         board_size = self._active_board_size(query, key_value)
 
         q = self._to_tokens(q_proj, self.q_heads, self.query_is_spatial)
@@ -340,6 +382,7 @@ class RegularSelfAttention(RegularCrossAttention):
             global_rope_frequencies=global_rope_frequencies,
             local_rope_frequencies=local_rope_frequencies,
             group=group,
+            fuse_qkv=True,
         )
 
     def forward(self, query: torch.Tensor, key_value: torch.Tensor | None = None) -> torch.Tensor:
@@ -349,7 +392,7 @@ class RegularSelfAttention(RegularCrossAttention):
 
 
 class RegisterToSpatialAttention(RegularCrossAttention):
-    """Registers query spatial features and update register/fiber tokens."""
+    """Update registers: Q comes from registers; fused K/V come from the board."""
 
     def __init__(
         self,
@@ -380,7 +423,7 @@ class RegisterToSpatialAttention(RegularCrossAttention):
 
 
 class SpatialToRegisterAttention(RegularCrossAttention):
-    """Spatial features query register/fiber tokens and update spatial tokens."""
+    """Update the board: Q comes from the board; fused K/V come from registers."""
 
     def __init__(
         self,

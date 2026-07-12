@@ -1,23 +1,18 @@
-"""Unified SAKIGo network: one implementation for the D4-equivariant model
-(group_size=8) and the scalar control (group_size=1), selected by
-config.architecture. State-dict compatible with the legacy SakiGoModel for
-group_size=8; legacy scalar checkpoints load via
-sakigo.model.checkpoints.remap_legacy_scalar_state_dict.
-"""
+"""D4-equivariant SAKIGo network with a fixed register-exchange schedule."""
 
 from __future__ import annotations
-
-from collections import OrderedDict
 
 import torch
 from torch import nn
 
 from sakigo.model.config import SakiGoModelConfig
 from sakigo.model.layers import (
+    BoardBlock,
     GroupLift,
     GroupPointwiseMLP,
     InvariantHead,
-    TrunkBlock,
+    RegisterBroadcast,
+    RegisterGather,
 )
 
 
@@ -33,8 +28,23 @@ def scalar_mlp(channels: tuple[int, ...]) -> nn.Sequential:
     return nn.Sequential(*layers)
 
 
+def scalar_spatial_mlp(channels: tuple[int, ...]) -> nn.Sequential:
+    """Pointwise scalar-board MLP used before lifting into regular features."""
+    if len(channels) < 2:
+        raise ValueError("scalar spatial MLP needs at least two channel sizes")
+    layers: list[nn.Module] = []
+    last = len(channels) - 2
+    for index, (in_channels, out_channels) in enumerate(zip(channels, channels[1:])):
+        projection = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        nn.init.zeros_(projection.bias)
+        layers.append(projection)
+        if index < last:
+            layers.append(nn.SiLU())
+    return nn.Sequential(*layers)
+
+
 class SakiGoNet(nn.Module):
-    """Spec-backed SAKIGo model with an explicit group axis (G ∈ {1, 8})."""
+    """Spec-backed SAKIGo model with an explicit D4 group axis (G = 8)."""
 
     def __init__(self, config: SakiGoModelConfig | str | None = None) -> None:
         super().__init__()
@@ -48,38 +58,42 @@ class SakiGoNet(nn.Module):
         self._validate_config()
         group_size = self.group_size
 
+        self.stem = scalar_spatial_mlp(self.config.stem_channels)
         self.lift = GroupLift(group_size)
-        self.stem = GroupPointwiseMLP(self.config.stem_channels, group_size)
         register_channels = self._register_channels()
         self.rule_mlp = scalar_mlp(self.config.rule_mlp_channels)
 
-        gather_blocks = self._gather_blocks()
-        broadcast_blocks = set(self.config.broadcast_blocks)
-        self.blocks = nn.ModuleList(
-            [
-                TrunkBlock(
-                    trunk_channels=self.config.trunk_channels,
-                    register_channels=register_channels,
-                    bottleneck_channels=self.config.bottleneck_channels,
-                    register_bottleneck_channels=self._register_bottleneck_channels(),
-                    board_size=self.config.board_size,
-                    q_heads=self.config.q_heads,
-                    kv_heads=self.config.kv_heads,
-                    head_dim=self.config.head_dim,
-                    register_head_dim=self._register_head_dim(),
-                    global_rope_frequencies=self.config.global_rope_frequencies,
-                    local_rope_frequencies=self.config.local_rope_frequencies,
-                    block_count=self.config.block_count,
-                    eps=self.config.norm_eps,
-                    group_size=group_size,
-                    enable_gather=index + 1 in gather_blocks,
-                    enable_broadcast=index + 1 in broadcast_blocks,
-                    activation=self.config.activation,
-                    mlp_variant=self.config.trunk_mlp_variant,
-                )
-                for index in range(self.config.block_count)
-            ]
+        common_exchange = dict(
+            trunk_channels=self.config.trunk_channels,
+            register_channels=register_channels,
+            board_size=self.config.board_size,
+            q_heads=self.config.q_heads,
+            kv_heads=self.config.kv_heads,
+            register_head_dim=self._register_head_dim(),
+            global_rope_frequencies=self.config.global_rope_frequencies,
+            local_rope_frequencies=self.config.local_rope_frequencies,
+            eps=self.config.norm_eps,
+            group_size=group_size,
         )
+        self.broadcast = RegisterBroadcast(**common_exchange)
+        self.blocks = nn.ModuleList(
+            BoardBlock(
+                trunk_channels=self.config.trunk_channels,
+                bottleneck_channels=self.config.bottleneck_channels,
+                board_size=self.config.board_size,
+                q_heads=self.config.q_heads,
+                kv_heads=self.config.kv_heads,
+                head_dim=self.config.head_dim,
+                global_rope_frequencies=self.config.global_rope_frequencies,
+                local_rope_frequencies=self.config.local_rope_frequencies,
+                block_count=self.config.block_count,
+                eps=self.config.norm_eps,
+                group_size=group_size,
+                activation=self.config.activation,
+            )
+            for _ in range(self.config.block_count)
+        )
+        self.gather = RegisterGather(**common_exchange)
 
         register_input = self._register_input_channels()
         self.invariant = InvariantHead("mean")
@@ -104,21 +118,11 @@ class SakiGoNet(nn.Module):
         self.budget_pass_head = head(
             config.budget_pass_channels, register_input, config.budget_pass_hidden, config.budget_pass_outputs
         )
-        self.ownership_head = head(
-            config.ownership_channels, config.trunk_channels, config.ownership_hidden, config.ownership_outputs
-        )
         self.policy_head = head(
             config.policy_channels, config.trunk_channels, config.policy_hidden, config.policy_outputs
         )
         self.budget_head = head(
             config.budget_channels, config.trunk_channels, config.budget_hidden, config.budget_outputs
-        )
-
-    def _gather_blocks(self) -> set[int]:
-        return (
-            set(range(1, self.config.block_count + 1))
-            if self.config.gather_blocks is None
-            else set(self.config.gather_blocks)
         )
 
     def _register_channels(self) -> int:
@@ -143,12 +147,12 @@ class SakiGoNet(nn.Module):
 
     def _validate_config(self) -> None:
         config = self.config
+        if config.block_count < 1:
+            raise ValueError("block_count must be positive")
         if config.input_planes != config.stem_channels[0]:
             raise ValueError("input_planes must match the first stem channel")
         if config.rule_dim != config.rule_mlp_channels[0]:
             raise ValueError("rule_dim must match the first rule MLP channel")
-        if config.trunk_mlp_variant.strip().lower() not in {"plain", "swiglu"}:
-            raise ValueError("trunk_mlp_variant must be 'plain' or 'swiglu'")
         register_input = self._register_input_channels()
         if config.rule_mlp_channels[-1] != register_input:
             raise ValueError("rule MLP output must equal register_count * register_channels")
@@ -172,7 +176,6 @@ class SakiGoNet(nn.Module):
             ("score_channels", config.score_channels, register_input),
             ("policy_pass_channels", config.policy_pass_channels, register_input),
             ("budget_pass_channels", config.budget_pass_channels, register_input),
-            ("ownership_channels", config.ownership_channels, config.trunk_channels),
             ("policy_channels", config.policy_channels, config.trunk_channels),
             ("budget_channels", config.budget_channels, config.trunk_channels),
         ):
@@ -180,7 +183,6 @@ class SakiGoNet(nn.Module):
                 raise ValueError(f"{label} must start with {expected} input channels")
         for label, outputs in (
             ("score_outputs", config.score_outputs),
-            ("ownership_outputs", config.ownership_outputs),
             ("policy_outputs", config.policy_outputs),
             ("policy_pass_outputs", config.policy_pass_outputs),
             ("budget_outputs", config.budget_outputs),
@@ -190,13 +192,6 @@ class SakiGoNet(nn.Module):
                 raise ValueError(f"{label} must be 1")
         if config.wdl_outputs != 4:
             raise ValueError("wdl_outputs must be 4")
-        broadcast_blocks = set(config.broadcast_blocks)
-        gather_blocks = self._gather_blocks()
-        if not gather_blocks:
-            raise ValueError("at least one register gather block is required")
-        for block in gather_blocks | broadcast_blocks:
-            if block < 1 or block > config.block_count:
-                raise ValueError("register blocks must be 1-based trunk block numbers")
 
     def initial_registers(self, rules: torch.Tensor) -> torch.Tensor:
         batch_size = rules.shape[0]
@@ -206,16 +201,6 @@ class SakiGoNet(nn.Module):
             self._register_channels(),
         )
         return registers.unsqueeze(-1).expand(-1, -1, -1, self.group_size).contiguous()
-
-    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
-        if "register_seed" in state_dict:
-            cleaned_state = OrderedDict(state_dict)
-            cleaned_state.pop("register_seed")
-            metadata = getattr(state_dict, "_metadata", None)
-            if metadata is not None:
-                cleaned_state._metadata = metadata
-            state_dict = cleaned_state
-        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def _merged_registers(self, registers: torch.Tensor, batch_size: int) -> torch.Tensor:
         return registers.reshape(
@@ -228,6 +213,11 @@ class SakiGoNet(nn.Module):
     def _spatial_logits(self, features: torch.Tensor) -> torch.Tensor:
         board = self.invariant(features).squeeze(1)
         return board.reshape(features.shape[0], features.shape[-2] * features.shape[-1])
+
+    def trunk_parameter_count(self) -> int:
+        """Parameters in broadcast + board blocks + gather."""
+        modules = (self.broadcast, self.blocks, self.gather)
+        return sum(parameter.numel() for module in modules for parameter in module.parameters())
 
     def forward(self, board: torch.Tensor, rules: torch.Tensor) -> dict[str, torch.Tensor]:
         if board.dim() != 4:
@@ -246,10 +236,12 @@ class SakiGoNet(nn.Module):
             raise ValueError(f"expected {self.config.rule_dim} rule features")
         rules = rules.to(device=board.device, dtype=board.dtype)
 
-        board_features = self.stem(self.lift(board))
+        board_features = self.lift(self.stem(board))
         registers = self.initial_registers(rules)
+        board_features, registers = self.broadcast(board_features, registers)
         for block in self.blocks:
-            board_features, registers = block(board_features, registers)
+            board_features = block(board_features)
+        board_features, registers = self.gather(board_features, registers)
 
         merged_registers = self._merged_registers(registers, board.shape[0])
         wdl_logits = self.invariant(self.wdl_head(merged_registers)).squeeze(1)
@@ -257,7 +249,6 @@ class SakiGoNet(nn.Module):
         policy_pass = self.invariant(self.policy_pass_head(merged_registers)).squeeze(1)
         budget_pass = self.invariant(self.budget_pass_head(merged_registers)).squeeze(1)
 
-        ownership_logits = self._spatial_logits(self.ownership_head(board_features))
         policy_board = self._spatial_logits(self.policy_head(board_features))
         budget_board = self._spatial_logits(self.budget_head(board_features))
         policy_logits = torch.cat((policy_board, policy_pass), dim=1)
@@ -265,7 +256,6 @@ class SakiGoNet(nn.Module):
         return {
             "wdl_logits": wdl_logits,
             "score": score,
-            "ownership_logits": ownership_logits,
             "policy_logits": policy_logits,
             "budget_logits": budget_logits,
         }

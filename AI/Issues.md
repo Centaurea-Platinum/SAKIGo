@@ -2,22 +2,30 @@
 
 Classified so later sessions know what is unsettled. Tags: **[Gap]** missing spec · **[Open]** undecided question · **[Risk]** could bite later · **[Nit]** cosmetic. Resolve an item by promoting it to [Decisions.md](Decisions.md) or deleting it.
 
+> **Current scope:** external KataGo-teacher distillation only. Search, self-play
+> training, feature/time auxiliaries, percentile score heads, and high-visit
+> Phase 2 are deferred. Related material below is historical backlog, not an
+> open requirement for current work.
+
 ## Current implementation watchlist
 
+- **[Risk] Pre-schema-5 checkpoints do not resume after the current architecture optimizations.** Schema 4 fused self-attention QKV and register-attention KV parameters; schema 5 moves the board stem into scalar `1x1` projections before the D4 lift. Both changes alter model keys and AdamW parameter slots, so earlier checkpoints are rejected explicitly. Inference weights could be migrated by concatenating attention projections and summing the old stem's group-component weights, but a training-resume optimizer migration has not been implemented. (D32, D33)
 - **[Risk] Data prep and orchestration need scale hardening.** The 2026-07-07 486-combination run exposed three future-run hazards: JSONL(.zst) -> tensor-shard prep is single-process/two-pass and slow at ~500k records; Windows `DataLoader(num_workers>0)` can fail under the current launcher, forcing `num_workers=0`; ad-hoc PowerShell orchestration folders got messy when scripts/logs/sweeps/train runs shared one root. Immediate code mitigation: batched `PreparedDataset.fetch_batch` / `__getitems__` reduces row-by-row memmap overhead, the batch-size benchmark now uses the same fast path, default metrics logging follows checkpoint cadence, and `python -m sakigo.train.suite` owns the future multi-spec layout (`data/`, `prepared/`, `generation/`, `train/<spec>/`, `logs/`, `sweeps/`, `scripts/`). Remaining scale work: parallelize JSONL(.zst) prep by shard or replace it with a one-pass indexed format.
-- **[Open] Training paradigm needs reconciliation.** D10 frames the destination as self-play search-into-prior, while the implemented Phase 1 is an external KataGo one-visit bootstrap. The old teacher-projection adapter was intentionally deleted at cutover. Decide whether external distillation is only bootstrap data, a maintained parallel experiment, or a replacement for the earlier self-play plan before implementing Phase 2/search targets. Sources: [Target.md](../Design/Distillation/Target.md), [RebuildPlan.md](RebuildPlan.md).
-- **[Open] KataGo Phase 1 generator still lacks true resume.** Failure status, stalled-response timeouts, atomic partial shards, explicit overwrite, and stale-shard protection are implemented. Remaining: resume an interrupted quota schedule without regenerating completed records; decide the intended rules/komi grid; and decide whether later phases need opponent-next-policy, score percentiles, auxiliary future targets, or full score-distribution targets. Sources: [generate/](../sakigo/generate), [writer.py](../sakigo/generate/writer.py).
+- **[Resolved by scope] Training paradigm.** Current work is external KataGo-teacher distillation. The older self-play/search framing is deferred and needs no reconciliation unless the project scope changes.
+- **[Open] KataGo Phase 1 generator still lacks true resume.** Failure status, stalled-response timeouts, atomic partial shards, explicit overwrite, and stale-shard protection are implemented. Remaining: resume an interrupted quota schedule without regenerating completed records and decide the intended rules/komi grid. Sources: [generate/](../sakigo/generate), [writer.py](../sakigo/generate/writer.py).
 - **[Gap] Engine scoring/adjudication remains partial.** The Rust engine now owns Tromp-Taylor/Chinese area scoring in addition to legality, history, and encoding. Ancient Chinese group tax, territory scoring/dead-stone adjudication, end-of-game detection, search, neural inference, and target generation remain open. See [Engine/README.md](../Engine/README.md).
-- **[Open] Illegal-move policy masking location.** [Policy+Budget.md](../Design/Output/Policy+Budget.md) now says train without masking illegal moves and mask only at inference as a precaution. The model emits raw logits and the engine can compute legality, but the inference/search layer that applies this mask is not implemented yet.
+- **[Resolved for current scope] Illegal-move policy masking.** Training uses raw logits; paired checkpoint-policy evaluation applies the engine's legal mask in `sakigo/eval/selfplay.py`.
 - **[Risk] Historical AI notes still have post-cutover drift.** Some older log and decision entries intentionally retain links and claims for deleted `Training/` / `Model/` code. Current source-of-truth contracts and READMEs are repaired; keep historical entries intact unless they actively mislead a live workflow.
 
-## Gaps — spec not yet written
+## Architecture validation
 
-- **[Open] Model sizing is now concrete but not validated.** `non-bottleneck`, `plain`, and `swiglu` are specified in [ModelSpecs.json](../sakigo/model/specs/ModelSpecs.json) and implemented in `sakigo/model/`. The open question is no longer "what are the first sizes?" but whether these sizes train well at scale.
-- **[Open] Equivariant attention is implemented, but training evidence is still open.** `SakiGoNet` uses regular-rep board/register fibers, equivariant QKV/channel mixing, canonical-frame RoPE, gather, broadcast, and group-axis-collapsed heads. Tests cover equivariance and shape behavior. `python -m sakigo.train.suite` can train `non-bottleneck`, `plain`, and `swiglu` with equal samples-seen budgets. Remaining: run them at scale and judge by paired game strength, not validation loss alone. (D13, D14, D18, D19)
-- **[Open] FiLM remains reserve/add-on only.** Rule-conditioned register initialization is implemented; no FiLM module exists in the current model code. Keep the open question limited to whether future data shows a need for multiplicative rule gating, and if so where it enters.
-- **[Open] Register read/write schedule and parameter cost.** Register width is now decoupled from board-trunk width (D25), reducing the current 128-wide experiment specs' register cost, but the gather/broadcast schedule is still empirical and should be revisited after real training measurements.
-- **[Gap] Search undefined.** `../Design/Search/` currently only contains a Gumbel MuZero / policy-improvement-by-planning PDF reference — SAKIGo's own algorithm (MCTS?) and how the budget head's prior feeds it are unspecified. Author has flagged a **PUCT redesign**; candidate directions below.
+- **[Open] The parameter-matched depth/width sweep needs training evidence.** D31 fixes D4, `m = 128`, register widths, the two-attention plain block, one initial broadcast, one final gather, and a trunk target of 5,405,426 parameters with 0.2% tolerance. The packaged comparison is `narrow-deep` (`n=40, L=33`), `balanced` (`n=64, L=16`), and `wide-shallow` (`n=128, L=5`). Run all three with equal samples seen and judge them by paired game strength and throughput/memory measurements, not validation loss alone. (D31)
+- **[Risk] Parameter matching does not match compute.** Board-attention mixing scales approximately with `L*n`, and sequential depth plus saved activations grow with `L`; the narrow/deep model is therefore expected to be slower and more memory-intensive than the wide/shallow model despite nearly equal trunk parameters. Record step time, peak memory, and achieved batch size beside quality metrics. (D31)
+- **[Open] D4 equivariance is tested structurally but not yet justified empirically at scale.** `SakiGoNet` uses regular-representation board/register fibers, equivariant QKV/channel mixing, canonical-frame RoPE, and group-axis-collapsed heads. The active architecture deliberately has no scalar-control package, so the current question is whether the fixed D4 family trains well—not a parallel symmetry ablation. (D13, D14, D18, D31)
+
+## Deferred backlog - not currently considered
+
+- **[Deferred] Search design.** `../Design/Search/` contains reference material only. No search specification is required in the current distillation scope.
 
   *Search landscape (reference, 2026-06-17), most relevant first:*
   - **Gumbel MuZero/AlphaZero** (Danihelka et al., ICLR 2022) — Gumbel-top-k + Sequential Halving at root, completed-Q interior selection; provable policy improvement at *low* visit counts. Hits exactly where vanilla PUCT is weak — bears on subtree harvest's low-m nodes (D11) and the best-move-visit cutoff (D12).
@@ -33,19 +41,18 @@ Classified so later sessions know what is unsettled. Tags: **[Gap]** missing spe
   - **[Open] "Change the policy" — argmax or distribution?** Root argmax → binary VOI (top-2 collapse); root visit distribution → a KL magnitude (nonzero almost everywhere), not a probability. The KL-shift version likely fits the training goal better but isn't "probability of flipping." Pin which. (D16)
   - **[Open] Posterior propagation cost.** Bayesian VOI needs per-node posteriors pushed through negamax max-nodes (max of RVs isn't closed-form) + myopic single-step assumption → approximations re-enter, denting the "clean" appeal. (D16)
   - **[Open] Budget head as learned VOI.** Most promising synthesis: regress the budget head to realized policy-change-per-visit (amortized value-of-computation) instead of computing VOI analytically; pair with Gumbel-style root selection. Ties D16 to D12/D5. (D16)
-- **[Gap] Training loop only sketched.** `../Design/Train/` now frames the principle (student–teacher distillation, D10) and one optimization (subtree harvest, D11), but per-head loss weighting, the self-play position distribution, target/replay-buffer mechanics, and the auxiliary-head targets are still unspecified.
+- **[Deferred] Self-play training loop.** The `Design/Train/` material is retained only as future reference.
 
-## Open questions
+### Other deferred questions
 
-- **[Open] Auxiliary horizon.** The n in g(x_t) = f(x_{t+n}) is unspecified — one horizon or several, and which heads get auxiliaries? (D8)
-- **[Open] Percentile-score granularity.** Number and spacing of percentile bins is TBD. (D7)
-- **[Open] Optional FiLM add-on sites.** If direct register initialization is not enough, decide how many FiLM sites to add and where their bias+scale enters the trunk. (D2)
+- **[Deferred] Auxiliary horizon.** Feature/time auxiliary heads are not currently considered. (D8)
+- **[Deferred] Percentile-score granularity.** Percentile score heads are not currently considered. (D7)
 
 ## Nits
 
 - *(none open)*
 
-## Training design review (2026-06-17)
+## Deferred training/search review (2026-06-17)
 
 From evaluating the `Train` notes. (D10 = student–teacher, D11 = subtree harvest.)
 
@@ -65,18 +72,17 @@ From evaluating the `Train` notes. (D10 = student–teacher, D11 = subtree harve
 
 Surfaced while evaluating the `Input` / `Output` notes; each is a question for the human, not a change. Four original items were **resolved on review** (2026-06-17) and removed: territory⟂captures and captures-range (CapturedStones is a retained scalar, not droppable), on-board mask (the new `Boundary` plane covers it), and the history plane (prior intentionally dropped → D9 in [Decisions.md](Decisions.md)).
 
-- **[Deferred] Policy-vs-Budget loss construction.** Split is clarified: budget should be smooth because it guides search; policy may be sharp because it is an auxiliary reward/ranking target, not the search prior. Exact policy target construction, loss weighting, and inference use are training-phase decisions. (D5, D17)
-- **[Risk] Percentile head: quantile crossing.** Pinball loss needs a monotonicity constraint or sorted outputs so q10 ≤ … ≤ q90. (D7)
-- **[Risk] Auxiliary head non-stationary target.** Regress g to the *realized* future outcome (or a target net), not the live f(x_{t+n}), to avoid chasing a moving target. (D8)
+- **[Open] Soft budget versus hard policy duplication.** Budget learns the raw teacher policy and policy learns its derived top-1 move. Decide whether the hard head adds useful ranking pressure or merely double-weights the same action target; keep separate loss weights explicit. (D5, D17, D21)
+- **[Deferred] Percentile head: quantile crossing.** Retained only as a future caution. (D7)
+- **[Deferred] Auxiliary head non-stationary target.** Retained only as a future caution. (D8)
 
-## External evidence — vibego distillation study (2026-06-19; re-scoped for self-play 2026-06-19)
+## External evidence — vibego distillation study (2026-06-19; historical framing)
+
+> **Current-scope note (2026-07-12):** direct external-distillation findings in
+> this section may be relevant again. Gumbel, PUCT, self-play, and other search
+> implications are deferred. Older statements that assume self-play is the
+> active paradigm are superseded by D30.
 
 From [sanderland/vibego](https://github.com/sanderland/vibego) (Sander Land, KaTrain author): an agent-driven single-GPU study distilling tiny (0.8–4.2M-param) KataGo-style nets from the public `kata1-b18` teacher, judged by paired color-reversed games. Findings are small-scale / low-visit / single-teacher.
 
-**Scope correction (2026-06-19, human):** vibego is an **offline distillation** study (relabel a fixed *external* teacher onto archive positions). SAKIGo trains by **self-play** (D10) — search-into-prior on its *own* games, outcome-grounded by z. So vibego's two headline "trap" findings are **distillation-specific and largely do not transfer**; the paradigm-agnostic findings (symmetry feature, measurement) do. Re-scoped:
-
-- **"Searched targets are a trap" is an offline-relabel artifact — does *not* apply to self-play.** vibego: 32-visit relabel lost to 1-visit soft labels, and *history-less* relabel was decisively harmful (−38.7 sL) because search compounds the missing ko/capture context. **Both mechanisms are offline-relabel-specific.** Under self-play SAKIGo (a) generates its own games, so full history is present at target-generation time and the history-less failure cannot occur (see D9), and (b) the searched visit distribution *is* the standard, z-anchored policy-improvement target (AlphaZero/KataGo). So this does **not** challenge subtree harvest (D11). The one transferable grain: searched/greedy targets are *sharper* and can collapse toward argmax — already tracked as the "soft vs hard statistics" item (keep budget targets soft; D17 sharpens only the auxiliary policy head). (D11, D10, D9, D17)
-- **Gumbel-loses-to-PUCT was a *distilled-net* result — self-play is the regime where Gumbel works.** vibego's stated mechanism: distillation gives a strong policy prior beside a noisy value head, and Gumbel's value-trusting completed-Q is wrong for that profile — "published Gumbel low-visit wins come from RL-loop nets where policy and value are balanced." SAKIGo *is* a self-play RL loop → the balanced regime, so this **supports rather than tempers** the Gumbel-style lean in D16. Residual caveat: D17's deliberately sharper policy + harvested (non-z) interior values could partially re-create the imbalance, so still A/B it at the target visit count. (D16, D10, D17)
-- **[Open] Cheap local-symmetry alternative to the ×8 G-CNN.** ~+200 Elo for ~0 FLOPs at the small tier from a 3×3 **D4-canonical pattern-embed table** (each cell's 3×3 {empty/own/opp} neighborhood mapped through its dihedral-canonical form into a learned embedding, added to trunk input) — local symmetry as a cheap input feature instead of a full regular-rep trunk. A concrete data point for the "×8 regular-rep cost vs plain augmentation" question. Paradigm-agnostic — applies to self-play. (D13)
-- **[Gap] The measurement methodology SAKIGo still lacks** *(partially closed 2026-07-03)*. Per-game score sd ≈ 30–40 pts, and **val loss anti-correlated with strength** repeatedly (capacity and data-diversity gains were invisible-or-inverted in held-out loss) — judging by val loss "concludes the opposite of the truth." Now implemented in [selfplay_eval.py](../Training/selfplay_eval.py): paired color-reversed openings, Elo±CI (Wilson), per-pair outcome counts, deterministic seeding, SGF dumps. Still missing: a neutral-judge scoreLead adjudication for games cut at the ply cap (current cutoff scores the unfinished board by raw Tromp-Taylor area — noisy for weak nets that never finish), sequential early stopping, and search-based players. Also: Python legality makes matches slow (~30 plies/s; incremental legal-mask or the Rust engine would fix it). Their day-eating **perspective bug** (Black-perspective judge values sign-flipping half the search tree) is precisely SAKIGo's flagged per-ply sign-flip risk. Paradigm-agnostic — applies to self-play. (training-loop gap, D11)
-- **vibego chose distillation; SAKIGo deliberately chose self-play.** So vibego's distillation-recipe specifics (raw soft prior > searched labels, ensemble teachers > deeper search) are out of scope. Net-sizing carries over though: when a small net plateaus, add parameters before data (capacity-bound ≤~1.5M vs data-bound ~2.6M params). (D10, D13)
+**Current interpretation:** vibego is directly relevant because SAKIGo now shares its fixed external-teacher distillation regime. Its small-scale evidence favors one-visit/raw soft teacher policy over searched or sharpened relabeling, which supports the current Phase 1 boundary and argues against activating high-visit Phase 2 without new evidence. Its history-less relabel failure reinforces keeping the engine's history-aware legality projection. Its measurement warning also remains useful: validation loss alone may not predict playing strength, so compare distilled checkpoints with paired color-reversed policy matches. Search/Gumbel conclusions are outside the current scope.

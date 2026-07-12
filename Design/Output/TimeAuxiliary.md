@@ -1,3 +1,6 @@
+> **Status: Not currently considered.** This note is retained only as a possible
+> future direction; current work is limited to KataGo-teacher distillation.
+
 Time auxiliary heads are essentially heads that try to predict the value of main heads after some \delta t.
 Mathematically, this will be:
     f(x_t): Output of a head at board state x_t

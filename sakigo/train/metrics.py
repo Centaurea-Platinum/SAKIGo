@@ -47,8 +47,6 @@ def metric_fields() -> list[str]:
             fields.append(f"{prefix}_{head}_illegal_mass")
             fields.append(f"{prefix}_{head}_illegal_target_count")
         fields.append(f"{prefix}_score_mae")
-        fields.append(f"{prefix}_ownership_sign_acc")
-        fields.append(f"{prefix}_ownership_cell_count")
     fields.extend(confusion_fields())
     return fields
 
@@ -121,7 +119,6 @@ class MetricAccumulator:
         for head in ACTION_HEADS:
             self._add_action(output, batch, head)
         self._add_score(output, batch)
-        self._add_ownership(output, batch)
 
     def _add_wdl(self, output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> None:
         mask = batch["wdl_mask"]
@@ -165,14 +162,6 @@ class MetricAccumulator:
         self._sum("score_abs", (error.squeeze(1) * mask).sum())
         self._sum("score_total", mask.sum())
 
-    def _add_ownership(self, output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> None:
-        mask = batch["ownership_mask"].float()
-        predicted = output["ownership_logits"].detach() >= 0.0
-        target = batch["ownership_target"] >= 0.0
-        per_record = (predicted == target).float().sum(dim=-1)
-        self._sum("ownership_correct", (per_record * mask).sum())
-        self._sum("ownership_cells", mask.sum() * batch["ownership_target"].shape[-1])
-
     def averages(self) -> dict[str, float]:
         sums = {key: float(value.cpu()) for key, value in self._sums.items()}
         out: dict[str, float] = {
@@ -195,9 +184,6 @@ class MetricAccumulator:
             out[f"{head}_illegal_target_count"] = illegal_count
         score_total = sums.get("score_total", 0.0)
         out["score_mae"] = sums.get("score_abs", 0.0) / score_total if score_total else _nan()
-        cells = sums.get("ownership_cells", 0.0)
-        out["ownership_sign_acc"] = sums.get("ownership_correct", 0.0) / cells if cells else _nan()
-        out["ownership_cell_count"] = cells
         return out
 
 

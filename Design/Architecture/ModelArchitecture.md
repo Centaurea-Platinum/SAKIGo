@@ -1,127 +1,328 @@
-The model trunk uses D4-equivariant grouped-query attention. Reference [./EquivariantAttention.md].
+# Model Architecture
 
-G = D4 for the main equivariant model. The scalar control uses the same implementation with G = 1.
+SAKIGo uses one deliberately narrow model family: a D4-equivariant board
+stream, a small rule/register stream, and a fixed trunk program. The packaged
+models vary only the board bottleneck width `n` and the number of board blocks
+`L` while holding the persistent board width and trunk parameter budget fixed.
 
-The stem first lifts scalar input planes into D4-regular features, then applies D4-regular equivariant 1x1 fiber mixing to reach trunk width. The lift repeats scalar planes across the group axis, and regular 1x1 mixing keeps group-constant fibers group-constant. The 8 D4 components first diverge at the first RoPE'd board attention layer.
+The implementation lives in `sakigo/model/model.py` and
+`sakigo/model/layers.py`. Reusable regular-representation operations live in
+`equivariant_attention/layers.py`.
 
-Rule features initialize the register stream:
+Use the [interactive architecture pipeline](../../Viewer/model_architecture.html)
+to inspect the program and compare the depth/width sweep.
 
-```python
-x = stem(lift(board))                         # [B, trunk_channel, G, H, W]
+## Fixed Architecture
 
-registers = rule_mlp(rules)                   # [B, register_count * register_channel]
-registers = reshape(registers)
-registers = expand_group_axis(registers)      # [B, register_count, register_channel, G]
+| Part | Value |
+|---|---|
+| Accepted board | square `N x N`, `N <= 32` |
+| Inputs | 6 board planes, 10 rule features |
+| Symmetry | D4 regular representation, `G = 8` |
+| Board stem | scalar pointwise `6 -> 16 -> 128`, then one D4 lift |
+| Rule MLP | `10 -> 32 -> 128`, reshaped to `2 x 64` registers |
+| Persistent board width | `m = 128` |
+| Register state | `R = 2`, `r = 64` per register |
+| Register attention width | `a = 32` |
+| Attention heads | `Hq = 2`, `Hkv = 1` |
+| Board block | plain `m -> n`, two self-attentions, `n -> m` |
+| Register exchange | one initial broadcast, one final gather |
+| Trunk parameter target | `5,405,426`, tolerance `0.2%` |
+
+There is no scalar-control model, SwiGLU variant, FiLM path, repeated register
+cycle, or general trunk-layout experiment in the current architecture.
+
+## Packaged Depth/Width Sweep
+
+All three models keep `m = 128` and every non-board-block width fixed. Integer
+block counts make exact parameter equality impossible, so the sweep uses the
+closest useful configurations within `0.2%` of the balanced target.
+
+| Spec | Bottleneck `n` | Blocks `L` | Parameters in blocks | Broadcast | Gather | Trunk total | Difference from target |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `narrow-deep` | 40 | 33 | 5,259,507 | 82,305 | 65,857 | 5,407,669 | +0.041% |
+| `balanced` (default) | 64 | 16 | 5,257,264 | 82,305 | 65,857 | 5,405,426 | 0.000% |
+| `wide-shallow` | 128 | 5 | 5,250,575 | 82,305 | 65,857 | 5,398,737 | -0.124% |
+
+This is a controlled depth-versus-width comparison, not three unrelated model
+designs.
+
+## Tensor Conventions
+
+```text
+B   batch size
+G   D4 group size = 8
+N   active square-board size
+S   board token count = N * N
+R   register count = 2
+
+m   persistent board width = 128
+n   board-block bottleneck width = 40, 64, or 128
+r   persistent width of each register = 64
+a   register cross-attention width = 32
 ```
 
-Each trunk block is a nested residual bottleneck around the board stream, with optional register gather/broadcast residuals on selected 1-based block indices:
+The two persistent states are:
 
-```python
-# x has m regular reps: [B, m, G, H, W]
-# registers have r regular reps per register token: [B, register_count, r, G]
-
-residual = x
-x_norm = norm_in(residual)
-
-if block_index in register_gather_blocks:
-    registers = registers + gamma_1 * gather(
-        norm_reg(registers),                  # Q from registers
-        x_norm,                               # K/V from board
-    )
-    # gather uses register_bottleneck_channel as its internal attention width.
-    # Its output projection returns register_channel, so the register residual shape is stable.
-
-if trunk_mlp_variant == "plain":
-    x_1 = activation(f1(x_norm))              # f1: m -> n regular reps
-elif trunk_mlp_variant == "swiglu":
-    value, gate = split(f1(x_norm), 2)        # f1: m -> 2n regular reps
-    x_1 = value * SiLU(gate)                  # output: n regular reps
-
-x_2 = x_1 + alpha_1 * attn_1(norm_1(x_1))     # board self-attention, n reps
-x_3 = x_2 + alpha_2 * attn_2(norm_2(x_2))     # board self-attention, n reps
-
-out = residual + beta * f4(norm_3(x_3))       # f4: n -> m regular reps, linear
-
-if block_index in register_broadcast_blocks:
-    out = out + gamma_2 * broadcast(
-        norm_out(out),                        # Q from board
-        norm_reg_out(registers),              # K/V from registers
-    )
-    # broadcast also uses register_bottleneck_channel internally.
-    # Its output projection returns trunk_channel, so the board residual shape is stable.
-
-return out, registers
+```text
+board features   [B, m, G, N, N]
+registers        [B, R, r, G]
 ```
 
-`alpha_1`, `alpha_2`, `beta`, and enabled `gamma_1`/`gamma_2` are independent learned scalar residual multipliers in each block. They initialize to `1 / sqrt(2 * block_count)`.
+A regular `1x1` layer mixes channels and the entire group fiber at each board
+cell or register token using tied equivariant weights. `GroupRMSNorm`
+normalizes the channel and group axes jointly at each cell or register, with
+one learned scale per channel shared across `G`.
 
-The trunk bottleneck width `bottleneck_channel` controls the board stream between `f1` and `f4`. The register attention width `register_bottleneck_channel` controls only the hidden Q/K/V width of register gather/broadcast attention. It does not change the persistent register width; register tensors remain `register_channel` wide across residual adds.
-
-Register gather and broadcast are cross-attention updates with explicit output projections back to the persistent stream width. Let:
-
-```python
-board_dim = trunk_channel
-register_dim = register_channel
-register_bottleneck_dim = register_bottleneck_channel
-register_head_dim = register_bottleneck_dim // q_heads
-raw_kv_dim = kv_heads * register_head_dim
-```
-
-With grouped-query attention, Q has `q_heads` heads while K/V have `kv_heads` heads. If `kv_heads < q_heads`, K/V are projected to `raw_kv_dim`, then repeated across query-head groups inside attention. The attended result is still `q_heads * register_head_dim == register_bottleneck_dim`.
-
-Register gather updates the register stream from the board stream:
+## Fixed Forward Program
 
 ```python
-# registers query the board
-register input:    register_dim
-board input:       board_dim
+def forward(board, rules):
+    # board: [B, 6, N, N], rules: [B, 10]
+    x = lift(stem(board))                  # [B, 128, 8, N, N]
+    registers = initial_registers(rules)  # [B, 2, 64, 8]
 
-Q projection:      register_dim -> register_bottleneck_dim
-K projection:      board_dim -> raw_kv_dim
-V projection:      board_dim -> raw_kv_dim
-attention result:  register_bottleneck_dim
-output projection: register_bottleneck_dim -> register_dim
-residual add:      register_dim + register_dim
+    x = broadcast(x, registers)
+    for block in board_blocks:            # exactly L plain blocks
+        x = block(x)
+    registers = gather(registers, x)
+
+    global_features = reshape(registers, [B, 1, R * r, G])
+
+    wdl_logits = mean_group(wdl_head(global_features))
+    score = mean_group(score_head(global_features))
+    policy_pass = mean_group(policy_pass_head(global_features))
+    budget_pass = mean_group(budget_pass_head(global_features))
+
+    policy_board = flatten_board(mean_group(policy_head(x)))
+    budget_board = flatten_board(mean_group(budget_head(x)))
+
+    return {
+        "wdl_logits": wdl_logits,                           # [B, 4]
+        "score": score,                                     # [B, 1]
+        "policy_logits": concat(policy_board, policy_pass), # [B, S + 1]
+        "budget_logits": concat(budget_board, budget_pass), # [B, S + 1]
+    }
 ```
 
-Register broadcast updates the board stream from the register stream:
+The model returns raw values. It applies no legality mask, softmax, sigmoid,
+dropout, causal mask, or final trunk normalization. Pass is the final action
+logit.
+
+Mean-pooling `G` makes WDL, score, and pass outputs invariant. Spatial heads
+remain D4-equivariant because board positions still transform.
+
+## Stem And Register Initialization
 
 ```python
-# board queries the registers
-board input:       board_dim
-register input:    register_dim
+x = scalar_conv1x1_6_16(board)            # [B, 16, N, N]
+x = silu(x)
+x = scalar_conv1x1_16_128(x)              # [B, 128, N, N]
+x = lift(x)                               # [B, 128, G, N, N]
 
-Q projection:      board_dim -> register_bottleneck_dim
-K projection:      register_dim -> raw_kv_dim
-V projection:      register_dim -> raw_kv_dim
-attention result:  register_bottleneck_dim
-output projection: register_bottleneck_dim -> board_dim
-residual add:      board_dim + board_dim
+registers = scalar_mlp_10_32_128(rules)  # fixed SiLU between projections
+registers = reshape(registers, [B, 2, 64, 1])
+registers = expand(registers, group=G)
 ```
 
-So `register_bottleneck_channel` is not a new register state size. It is the internal query/attention result width used before the output projection returns to either `register_dim` for gather or `board_dim` for broadcast.
+The pointwise scalar stem commutes with every board transformation, so its
+output may be lifted only once at the end without weakening D4 equivariance.
+Running the same maps after lifting produced eight identical output fibers and
+also reread eight identical input fibers. Moving the lift reduces the stem from
+17,296 to 2,288 parameters and its dense linear MAC count by 64x. The stem still
+contains no spatial mixing; its `1x1` maps only mix channels at each cell.
 
-Board attention uses spec-listed global and local 2D RoPE frequencies. Each frequency rotates 4 head dimensions: row sine/cosine and column sine/cosine. Any head dimensions beyond `4 * frequency_count` remain unrotated. RoPE applies only to board-side Q/K. Register tokens are unrotated.
+The rule MLP directly creates the register state; its final bias already
+supplies a rule-independent component, so there is no separate learned
+register seed.
 
-Global heads merge register tokens into one D4-regular vector, apply D4-regular head MLPs, then average over the D4 axis to produce invariant logits:
+The initial broadcast is the only path from rules into the board trunk. Its
+board-side queries use RoPE, so it conditions spatial board features before any
+board self-attention. The final gather refreshes registers from the fully
+processed board immediately before the global and pass heads.
+
+## Plain Two-Attention Board Block
 
 ```python
-merged_registers = reshape(registers)         # [B, 1, register_count * register_channel, G]
-wdl_logits       = invariant(wdl_head(merged_registers))
-score            = invariant(score_head(merged_registers))
-policy_pass      = invariant(policy_pass_head(merged_registers))
-budget_pass      = invariant(budget_pass_head(merged_registers))
+def BoardBlock(x):
+    residual = x                              # [B, m, G, N, N]
+    work = silu(f1(rms_norm_in(x)))           # regular f1: m -> n
+
+    work = work + alpha_1 * attn_1(rms_norm_1(work))
+    work = work + alpha_2 * attn_2(rms_norm_2(work))
+
+    delta = rms_norm_3(work)
+    return residual + beta * f4(delta)        # regular f4: n -> m
 ```
 
-Spatial heads apply D4-regular equivariant head MLPs to the final board features, then average over the D4 axis to produce invariant board logits:
+The persistent `m`-wide residual bypasses the bottleneck. The two attention
+updates share one `m -> n -> m` envelope but own independent Q/K/V parameter
+slices and output projections. Within each attention update, Q/K/V are issued
+by one fused regular projection. `alpha_1`, `alpha_2`, and `beta` are learned
+scalars in every block, initialized to `1 / sqrt(2 * L)`.
+
+No register operation or conditioning branch is embedded in a board block.
+
+## Exact Trunk Parameter Formula
+
+For D4 (`G = 8`), `Hq = 2`, `Hkv = 1`, a plain block has:
+
+```text
+f1 + f4                 16*m*n + n + m
+two GQA modules          48*n^2 + 6*n
+four RMSNorms + scalars       m + 3*n + 3
+------------------------------------------------
+P_block(m, n)           16*m*n + 48*n^2 + 10*n + 2*m + 3
+```
+
+At fixed `m = 128`:
+
+```text
+P_block(n) = 48*n^2 + 2058*n + 259
+```
+
+The fixed exchange modules contain:
+
+```text
+initial broadcast   82,305
+final gather        65,857
+exchange total     148,162
+```
+
+Therefore:
+
+```text
+P_trunk(n, L) = 148,162 + L * (48*n^2 + 2058*n + 259)
+```
+
+The trunk budget controls the comparison; it does not count the fixed stem,
+rule MLP, or output heads.
+
+## Grouped-Query Attention
+
+All attention modules use equivariant regular projections followed by PyTorch
+scaled-dot-product attention. Self-attention fuses Q/K/V because all three read
+the same tensor. Register cross-attention keeps Q separate and fuses K/V because
+K and V share the opposite stream:
 
 ```python
-ownership_logits = invariant(ownership_head(out))
-policy_board     = invariant(policy_head(out))
-budget_board     = invariant(budget_head(out))
+if self_attention:
+    q, k, v = split_regular_channels(regular_qkv_projection(query))
+else:
+    q = regular_q_projection(query)
+    k, v = split_regular_channels(regular_kv_projection(key_value))
 
-policy_logits = concat(policy_board, policy_pass)
-budget_logits = concat(budget_board, budget_pass)
+# [B, G, heads, tokens, d]; attention is independent per group component
+q, k, v = reshape_to_tokens(q, k, v)
+
+if query_is_board:
+    q = apply_2d_rope(q)
+if key_is_board:
+    k = apply_2d_rope(k)
+
+attended = scaled_dot_product_attention(
+    fold_batch_and_group(q),
+    fold_batch_and_group(k),
+    fold_batch_and_group(v),
+    enable_gqa=True,
+)
+return regular_output_projection(unfold(attended))
 ```
 
-Stem and head MLPs use fixed SiLU activations between projections and no activation after the final projection. The trunk's plain bottleneck mixer uses the spec-selected activation after `f1`; the SwiGLU variant replaces that activation site with `value * SiLU(gate)`. In both variants, `f4` remains linear so the residual update is sign-unconstrained.
+Attention never treats group components as tokens. Regular projections mix the
+group fiber before and after attention; SDPA folds `B * G` into the batch
+dimension. Projection fusion only concatenates output-channel slices: it does
+not share Q/K/V weights, change attention math, or change parameter counts.
+
+| Module | Query tokens | K/V tokens | Per-head width | Q width | K/V width | Output width |
+|---|---:|---:|---:|---:|---:|---:|
+| board self-attention | `S` | `S` | `n / 2` | `n` | `n / 2` | `n` |
+| final gather | `R` | `S` | 16 | 32 | 16 | 64 |
+| initial broadcast | `S` | `R` | 16 | 32 | 16 | 128 |
+
+## Positional Encoding
+
+Only board-side queries and keys receive 2D RoPE. Register tokens have no
+spatial position. For active board size `N`, each group component uses board
+coordinates in its canonical `g^-1` frame:
+
+```text
+global angle = frequency * coordinate / max(N - 1, 1)
+local angle  = frequency * coordinate
+```
+
+Each frequency consumes four head dimensions: a sine/cosine pair for rows and
+one for columns. The fixed frequencies `pi` and `pi/2` consume eight dimensions;
+remaining dimensions are unrotated.
+
+## Register Exchange
+
+Broadcast and gather are pre-normalized residual cross-attention modules. The
+query stream is the destination of the update; the K/V stream is the sole
+source of attended content:
+
+```python
+board_delta = broadcast_attention(
+    query=rms_norm(board),
+    key_value=rms_norm(registers),
+)
+board = board + gamma_broadcast * board_delta
+# registers are unchanged
+
+register_delta = gather_attention(
+    query=rms_norm(registers),
+    key_value=rms_norm(board),
+)
+registers = registers + gamma_gather * register_delta
+# board is unchanged
+```
+
+Each owns one learned `gamma`, initialized to the depth-independent value
+`1 / sqrt(2)`. Broadcast runs once before the board blocks; gather runs once
+after them. Their widths, placement, and initialization are fixed rather than
+sweep axes.
+
+| Operation | Q projection reads | Fused K/V projection reads | Board-side RoPE | Residual updated | Other stream |
+|---|---|---|---|---|---|
+| initial broadcast | board | registers | Q | board | registers returned unchanged |
+| final gather | registers | board | K | registers | board returned unchanged |
+
+There is no query-side V in either operation. During gather, V is computed only
+from the board. During broadcast, V is computed only from the registers. The
+query stream contributes the attention weights and survives through its explicit
+residual skip; V itself never receives RoPE.
+
+## Heads
+
+All seven subheads are built unconditionally.
+
+| Source | Pointwise shape | Outputs |
+|---|---|---|
+| merged registers `[B, 1, R*r, G]` | `R*r -> 32 -> 8 -> output` | WDL, score, policy pass, budget pass |
+| board `[B, m, G, N, N]` | `m -> 32 -> 8 -> 1` | policy board, budget board |
+
+Hidden projections use SiLU and final projections are linear. The group axis is
+always mean-pooled in the heads.
+
+## Parameter Equality Is Not Compute Equality
+
+At fixed board size, board-attention mixing scales approximately as:
+
+```text
+O(L * G * S^2 * n)
+```
+
+The three models therefore have different depth and attention work despite
+nearly identical trunk parameters:
+
+| Spec | Attention calls | `L*n` work proxy | `L*m` retained-depth proxy |
+|---|---:|---:|---:|
+| `narrow-deep` | 66 | 1,320 | 4,224 |
+| `balanced` | 32 | 1,024 | 2,048 |
+| `wide-shallow` | 10 | 640 | 640 |
+
+Narrow/deep supplies more sequential transformations but costs more attention
+mixing, activation memory, and optimization depth. Wide/shallow supplies richer
+features inside each block with fewer sequential steps and lower token-mixing
+cost. The balanced model is the default until training and paired-game evidence
+justify moving toward either extreme.
