@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import posixpath
 import re
 import sqlite3
@@ -455,6 +456,62 @@ def row_actions(row: dict[str, Any], board_size: int = 9) -> tuple[int, ...]:
     return tuple(sorted(set(actions)))
 
 
+def book_target_eligible(moves_json: str, next_player: str) -> bool:
+    """Return whether a page can produce every active book-derived target."""
+
+    from sakigo.generate.targets import round_half_point
+
+    try:
+        rows = json.loads(moves_json)
+        concrete: list[tuple[float, float, float | None]] = []
+        for row in rows:
+            if str(row.get("move", "")).lower() == "other" or not row_actions(row):
+                continue
+            score_raw = next(
+                (
+                    row[name]
+                    for name in ("ssM", "scoreMean", "score")
+                    if row.get(name) is not None
+                ),
+                0.0,
+            )
+            visits_raw = next(
+                (
+                    row[name]
+                    for name in ("av", "AVisits", "aVisits")
+                    if row.get(name) is not None
+                ),
+                0.0,
+            )
+            wl_raw = next(
+                (
+                    row[name]
+                    for name in ("wl", "winLossValue")
+                    if row.get(name) is not None
+                ),
+                None,
+            )
+            score = float(score_raw)
+            visits = float(visits_raw)
+            wl = None if wl_raw is None else float(wl_raw)
+            if not math.isfinite(score) or not math.isfinite(visits) or visits < 0:
+                return False
+            if wl is not None and not math.isfinite(wl):
+                return False
+            concrete.append((round_half_point(-score), visits, wl))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not concrete or sum(visits for _, visits, _ in concrete) <= 0:
+        return False
+    rounded_scores = [score for score, _, _ in concrete]
+    optimal = (
+        max(rounded_scores)
+        if str(next_player).upper() == "B"
+        else min(rounded_scores)
+    )
+    return any(wl is not None for score, _, wl in concrete if score == optimal)
+
+
 def iter_index_nodes(database: Path, where: str = "ply IS NOT NULL") -> Iterator[dict[str, Any]]:
     connection = sqlite3.connect(database)
     try:
@@ -540,6 +597,9 @@ def freeze_uniform_sample(
         return value & ((1 << 63) - 1)
 
     connection.create_function("sample_hash", 1, sample_hash, deterministic=True)
+    connection.create_function(
+        "target_eligible", 2, book_target_eligible, deterministic=True
+    )
     try:
         connection.executescript(
             """
@@ -565,24 +625,33 @@ def freeze_uniform_sample(
                 raise ValueError(
                     f"book sample is already frozen as {tuple(metadata)}, requested {expected}"
                 )
-            sampled = int(connection.execute("SELECT COUNT(*) FROM sampled_nodes").fetchone()[0])
-            if sampled != total:
-                raise ValueError("frozen book sample is incomplete")
-            return {
-                "train": train_count,
-                "validation": validation_count,
-                "total": total,
-            }
+            sampled, ineligible = connection.execute(
+                """SELECT COUNT(*),
+                          COALESCE(SUM(target_eligible(n.moves_json,n.next_player)=0),0)
+                   FROM sampled_nodes s JOIN nodes n ON n.node_id=s.node_id"""
+            ).fetchone()
+            if int(sampled) == total and int(ineligible) == 0:
+                return {
+                    "train": train_count,
+                    "validation": validation_count,
+                    "total": total,
+                }
+            # Repair older frozen samples that admitted terminal/other-only pages.
+            connection.execute("DELETE FROM sample_metadata")
         connection.execute("DELETE FROM sampled_nodes")
         available = int(
-            connection.execute("SELECT COUNT(*) FROM nodes WHERE valid=1").fetchone()[0]
+            connection.execute(
+                """SELECT COUNT(*) FROM nodes
+                   WHERE valid=1 AND target_eligible(moves_json,next_player)=1"""
+            ).fetchone()[0]
         )
         if available < total:
             raise ValueError(
                 f"book has {available:,} valid nodes, fewer than the requested {total:,}"
             )
         cursor = connection.execute(
-            """SELECT node_id FROM nodes WHERE valid=1
+            """SELECT node_id FROM nodes
+               WHERE valid=1 AND target_eligible(moves_json,next_player)=1
                ORDER BY sample_hash(node_id),node_id LIMIT ?""",
             (total,),
         )

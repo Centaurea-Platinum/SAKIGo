@@ -17,3 +17,8 @@ For each sampled book node:
 
 The frozen dataset contains `2^20` training positions and `2^12` validation
 positions selected uniformly by stable hash from validated canonical nodes.
+
+Implementation note: this one-off build sequentially replays the full book to
+validate histories and symmetry mappings before sampling. Its runtime is
+acceptable for the current run; if the dataset is ever regenerated, prefer
+sample-first validation (and optionally parallel frontier replay) instead.

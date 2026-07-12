@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import sqlite3
 import tarfile
 from pathlib import Path
 
@@ -89,13 +90,25 @@ def test_archive_index_replay_sample_and_book_record(tmp_path: Path) -> None:
     assert index_book_archive(archive, database) == {"parsed": 2, "rejected": 0}
     report = assign_validated_histories(database)
     assert report["valid"] == 2 and report["rejected"] == 0
+    # A structurally valid terminal/other-only page has no active training target.
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """INSERT INTO nodes
+               (node_id,next_player,parent_symmetry,board_json,moves_json,ply,
+                history_json,page_to_history_symmetry,valid)
+               VALUES('terminal','B',0,'[]','[{"move":"other","av":10}]',
+                      0,'[]',0,1)"""
+        )
     assert freeze_uniform_sample(
         database, train_count=1, validation_count=1, seed=7
     ) == {"train": 1, "validation": 1, "total": 2}
     tasks = list(iter_frozen_sample(database, split="train")) + list(
         iter_frozen_sample(database, split="validation")
     )
-    assert len(tasks) == 2 and len({task["node_id"] for task in tasks}) == 2
+    assert len(tasks) == 2 and {task["node_id"] for task in tasks} == {
+        "html/index.html",
+        "html/child.html",
+    }
     ruleset = ruleset_from_overrides(ruleset="tromp-taylor", komi=7.0)
     for task in tasks:
         record = build_book_training_record(task, ruleset=ruleset)

@@ -38,17 +38,21 @@ def run(generation_run: Path, suite_run: Path, poll_seconds: float = 30.0) -> No
                 state="generating_dataset_shards",
                 generation_run=str(generation_run.resolve()),
             )
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "sakigo.generate.book_distillation",
-                    "sample",
-                    "--run-dir",
-                    str(generation_run),
-                ],
-                check=True,
-            )
+            try:
+                subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "sakigo.generate.book_distillation",
+                        "sample",
+                        "--run-dir",
+                        str(generation_run),
+                    ],
+                    check=True,
+                )
+            except Exception as error:
+                _write_status(launcher_status, state="failed", error=str(error))
+                raise
             continue
         time.sleep(poll_seconds)
     manifest = json.loads(dataset_manifest.read_text(encoding="utf-8"))
