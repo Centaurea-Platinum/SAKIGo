@@ -152,11 +152,17 @@ def run(
     train_samples: int = 1 << 20,
     validation_samples: int = 1 << 12,
     index_workers: int = 3,
+    batch_size: int = 0,
+    benchmark_budget_fraction: float = 0.85,
 ) -> None:
     if train_samples <= 0 or validation_samples <= 0:
         raise ValueError("training and validation sample counts must be positive")
     if index_workers <= 0:
         raise ValueError("index_workers must be positive")
+    if batch_size < 0:
+        raise ValueError("batch_size must be non-negative")
+    if not 0.0 < benchmark_budget_fraction <= 1.0:
+        raise ValueError("benchmark_budget_fraction must be in (0, 1]")
     launcher_status = suite_run / "launcher_status.json"
     dataset_manifest = generation_run / "dataset_manifest.json"
     index_report = generation_run / "book_index_report.json"
@@ -260,6 +266,8 @@ def run(
         epochs=1,
         score_weight=81.0,
         model_compile=model_compile,
+        batch_size=batch_size,
+        benchmark_budget_fraction=benchmark_budget_fraction,
         prepared_dir=str(prepared_dir.resolve()) if prepared_dir else None,
     )
     try:
@@ -271,7 +279,8 @@ def run(
                 prepared_dir=prepared_dir,
                 specs=DEFAULT_SPECS,
                 seed=20260713,
-                batch_size=0,
+                batch_size=batch_size,
+                benchmark_budget_fraction=benchmark_budget_fraction,
                 steps=0,
                 num_workers=0,
                 checkpoint_interval=0,
@@ -309,16 +318,30 @@ def main() -> None:
     parser.add_argument("--train-samples", type=int, default=1 << 20)
     parser.add_argument("--validation-samples", type=int, default=1 << 12)
     parser.add_argument("--index-workers", type=int, default=3)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        help="Fixed batch size to safety-preflight; 0 selects automatically.",
+    )
+    parser.add_argument(
+        "--benchmark-budget-fraction",
+        type=float,
+        default=0.85,
+        help="Maximum fraction of total GPU memory available to the training batch.",
+    )
     args = parser.parse_args()
     run(
-        args.generation_run,
-        args.suite_run,
-        args.poll_seconds,
-        args.prepared_dir,
-        args.compile,
-        args.train_samples,
-        args.validation_samples,
-        args.index_workers,
+        generation_run=args.generation_run,
+        suite_run=args.suite_run,
+        poll_seconds=args.poll_seconds,
+        prepared_dir=args.prepared_dir,
+        model_compile=args.compile,
+        train_samples=args.train_samples,
+        validation_samples=args.validation_samples,
+        index_workers=args.index_workers,
+        batch_size=args.batch_size,
+        benchmark_budget_fraction=args.benchmark_budget_fraction,
     )
 
 
