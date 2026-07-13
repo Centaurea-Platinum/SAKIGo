@@ -120,10 +120,15 @@ def open_jsonl_text(path: Path) -> TextIO | _ZstdTextReader:
 
 
 class _ZstdTextWriter:
-    def __init__(self, path: Path, compression_level: int = 3) -> None:
+    def __init__(
+        self,
+        path: Path,
+        compression_level: int = 3,
+        threads: int = -1,
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._raw = path.open("wb")
-        compressor = zstd.ZstdCompressor(level=compression_level, threads=-1)
+        compressor = zstd.ZstdCompressor(level=compression_level, threads=threads)
         self._writer = compressor.stream_writer(self._raw, closefd=False)
         self._text = io.TextIOWrapper(self._writer, encoding="utf-8")
 
@@ -144,9 +149,17 @@ class _ZstdTextWriter:
         self.close()
 
 
-def open_jsonl_writer(path: Path, compression_level: int = 3) -> TextIO | _ZstdTextWriter:
+def open_jsonl_writer(
+    path: Path,
+    compression_level: int = 3,
+    threads: int = -1,
+) -> TextIO | _ZstdTextWriter:
     if is_zstd_jsonl_path(path):
-        return _ZstdTextWriter(path, compression_level=compression_level)
+        return _ZstdTextWriter(
+            path,
+            compression_level=compression_level,
+            threads=threads,
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     return path.open("w", encoding="utf-8")
 
@@ -228,12 +241,21 @@ def _record_ruleset(raw: Mapping[str, Any]) -> dict[str, object] | None:
 def record_from_json(raw: Mapping[str, Any], path: Path | None = None, line_number: int = 0) -> TrainingRecord:
     label = f"{path}:{line_number}" if path is not None and line_number else "record"
     try:
-        board_size = int(raw["board_size"])
-        ply = int(raw["ply"])
-        position_key = str(raw["position_key"])
-        schema_version = int(raw["schema_version"])
+        board_size = raw["board_size"]
+        ply = raw["ply"]
+        position_key = raw["position_key"]
+        schema_version = raw["schema_version"]
     except KeyError as exc:
         raise ValueError(f"{label} is missing field {exc}") from exc
+    for field, value in (
+        ("board_size", board_size),
+        ("ply", ply),
+        ("schema_version", schema_version),
+    ):
+        if type(value) is not int:
+            raise ValueError(f"{label} {field} must be an integer")
+    if not isinstance(position_key, str):
+        raise ValueError(f"{label} position_key must be a string")
     if schema_version not in {SCHEMA_VERSION, DISTILLATION_SCHEMA_VERSION}:
         raise ValueError(f"{label} uses unsupported schema_version {schema_version}")
     if board_size <= 0:

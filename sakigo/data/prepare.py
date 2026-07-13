@@ -12,6 +12,7 @@ Layout under out_dir/:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,16 +62,45 @@ class GroupInfo:
 def _source_fingerprint(
     train_paths: list[Path], validation_paths: list[Path]
 ) -> list[dict[str, object]]:
-    return [
-        {
+    def fingerprint(path: Path, role: str) -> dict[str, object]:
+        before = path.stat()
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns) != (
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise RuntimeError(f"data source changed while hashing: {path}")
+        return {
             "role": role,
-            "path": str(path),
-            "size": path.stat().st_size,
-            "mtime_ns": path.stat().st_mtime_ns,
+            "path": str(path.resolve()),
+            "size": after.st_size,
+            "mtime_ns": after.st_mtime_ns,
+            "sha256": digest.hexdigest(),
         }
+
+    return [
+        fingerprint(path, role)
         for role, paths in (("train", train_paths), ("validation", validation_paths))
         for path in paths
     ]
+
+
+def _validated_source_paths(paths: list[Path], *, role: str) -> list[Path]:
+    validated: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            raise ValueError(f"duplicate {role} data source: {resolved}")
+        if not resolved.is_file():
+            raise FileNotFoundError(f"{role} data source is missing: {resolved}")
+        seen.add(resolved)
+        validated.append(resolved)
+    return validated
 
 
 def _labeled_records(
@@ -151,32 +181,50 @@ def prepare_tensor_shards(
     force: bool = False,
 ) -> dict[str, object]:
     """Convert JSONL sources into tensor shards; skips work when up to date."""
-    data_paths = expand_data_paths(Path(item) for item in data)
+    data_paths = _validated_source_paths(
+        expand_data_paths(Path(item) for item in data), role="training"
+    )
     validation_paths = (
-        expand_data_paths(Path(item) for item in validation_data)
+        _validated_source_paths(
+            expand_data_paths(Path(item) for item in validation_data),
+            role="validation",
+        )
         if validation_data
         else []
     )
+    overlap = set(data_paths).intersection(validation_paths)
+    if overlap:
+        raise ValueError(
+            "training and validation sources overlap: "
+            + ", ".join(str(path) for path in sorted(overlap))
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     if not force and manifest_is_current(
         out_dir, data_paths, seed, val_fraction, validation_paths
     ):
         return load_manifest(out_dir)
     generation = f"generation_{uuid4().hex}"
+    source_fingerprint = _source_fingerprint(data_paths, validation_paths)
 
     # Pass 1: per-(split, size) counts and the ruleset key table.
     counts: dict[tuple[str, int], int] = {}
+    validation_counts: dict[tuple[int, str], int] = {}
     ruleset_keys: list[str] = []
     ruleset_index: dict[str, int] = {}
     for split, record in _labeled_records(
         data_paths, validation_paths, seed=seed, val_fraction=val_fraction
     ):
         counts[(split, record.board_size)] = counts.get((split, record.board_size), 0) + 1
+        if split == VAL_SPLIT:
+            cohort = (record.board_size, record.ruleset_key)
+            validation_counts[cohort] = validation_counts.get(cohort, 0) + 1
         if record.ruleset_key not in ruleset_index:
             ruleset_index[record.ruleset_key] = len(ruleset_keys)
             ruleset_keys.append(record.ruleset_key)
     if not counts:
         raise ValueError("no records found in the data sources")
+    if _source_fingerprint(data_paths, validation_paths) != source_fingerprint:
+        raise RuntimeError("data sources changed during preparation pass 1")
 
     # Pass 2: fill memmaps.
     writers: dict[tuple[str, int], dict[str, np.memmap]] = {}
@@ -239,6 +287,9 @@ def prepare_tensor_shards(
         else:
             arrays["legal_mask"][row] = True
 
+    if _source_fingerprint(data_paths, validation_paths) != source_fingerprint:
+        raise RuntimeError("data sources changed during preparation pass 2")
+
     for key, arrays in writers.items():
         assert cursors[key] == counts[key]
         for array in arrays.values():
@@ -251,9 +302,18 @@ def prepare_tensor_shards(
         "schema_version": SCHEMA_VERSION,
         "seed": seed,
         "val_fraction": val_fraction,
-        "sources": _source_fingerprint(data_paths, validation_paths),
+        "sources": source_fingerprint,
         "split_mode": "explicit" if validation_paths else "hash",
         "ruleset_keys": ruleset_keys,
+        "validation_groups": [
+            {
+                "board_size": board_size,
+                "ruleset_code": ruleset_index[ruleset_key],
+                "ruleset_key": ruleset_key,
+                "count": count,
+            }
+            for (board_size, ruleset_key), count in sorted(validation_counts.items())
+        ],
         "generation": generation,
         "groups": [
             {

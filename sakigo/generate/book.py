@@ -236,7 +236,12 @@ def index_book_archive(archive: Path, database: Path) -> dict[str, int]:
     return {"parsed": parsed, "rejected": rejected}
 
 
-def assign_canonical_histories(database: Path, root_id: str | None = None) -> dict[str, int]:
+def assign_canonical_histories(
+    database: Path,
+    root_id: str | None = None,
+    *,
+    board_size: int = 9,
+) -> dict[str, int]:
     """Freeze one lexicographically stable parent history for every reachable node."""
 
     connection = _connect(database)
@@ -269,7 +274,11 @@ def assign_canonical_histories(database: Path, root_id: str | None = None) -> di
                     "SELECT action,child_id FROM edges WHERE parent_id=? ORDER BY action,child_id",
                     (parent_id,),
                 ):
-                    coord = "pass" if action == 81 else _coord_9x9(int(action))
+                    coord = (
+                        "pass"
+                        if action == board_size * board_size
+                        else _coord(int(action), board_size)
+                    )
                     child_history = history + [[next_player, coord]]
                     changed = connection.execute(
                         """UPDATE nodes SET ply=?,history_json=?,valid=1
@@ -287,7 +296,13 @@ def assign_canonical_histories(database: Path, root_id: str | None = None) -> di
         connection.close()
 
 
-def assign_validated_histories(database: Path, root_id: str | None = None) -> dict[str, int]:
+def assign_validated_histories(
+    database: Path,
+    root_id: str | None = None,
+    *,
+    board_size: int = 9,
+    ruleset: Any | None = None,
+) -> dict[str, int]:
     """Assign histories, align page orientation, and reject replay disagreements."""
 
     from sakigo.generate.d4 import transform_action, transform_spatial
@@ -295,7 +310,10 @@ def assign_validated_histories(database: Path, root_id: str | None = None) -> di
     from sakigo.rulesets import BLACK, ruleset_from_overrides
     import random
 
-    ruleset = ruleset_from_overrides(ruleset="tromp-taylor", komi=7.0)
+    if board_size <= 0:
+        raise ValueError("board_size must be positive")
+    if ruleset is None:
+        ruleset = ruleset_from_overrides(ruleset="tromp-taylor", komi=7.0)
     connection = _connect(database)
 
     def validate(node_id: str, history: list[list[str]]) -> int | None:
@@ -306,13 +324,13 @@ def assign_validated_histories(database: Path, root_id: str | None = None) -> di
         if row is None:
             return None
         next_player, board_json, moves_json = row
-        game = GeneratorGame(0, random.Random(0), 9, ruleset)
+        game = GeneratorGame(0, random.Random(0), board_size, ruleset)
         for color, coord in history:
             expected = "B" if game.to_move == BLACK else "W"
             if str(color).upper() != expected:
                 return None
             try:
-                game.play(index_from_coord(str(coord), 9))
+                game.play(index_from_coord(str(coord), board_size))
             except (ValueError, RuntimeError):
                 return None
         expected_next = "B" if game.to_move == BLACK else "W"
@@ -325,7 +343,7 @@ def assign_validated_histories(database: Path, root_id: str | None = None) -> di
         symmetries = [
             symmetry
             for symmetry in range(8)
-            if transform_spatial(page_board, 9, symmetry) == engine_board
+            if transform_spatial(page_board, board_size, symmetry) == engine_board
         ]
         if not symmetries:
             return None
@@ -333,10 +351,10 @@ def assign_validated_histories(database: Path, root_id: str | None = None) -> di
         moves = json.loads(moves_json)
         for symmetry in symmetries:
             actions = [
-                transform_action(action, 9, symmetry)
+                transform_action(action, board_size, symmetry)
                 for move in moves
                 if str(move.get("move", "")).lower() != "other"
-                for action in row_actions(move)
+                for action in row_actions(move, board_size)
             ]
             if all(legal[action] for action in actions):
                 return symmetry
@@ -355,7 +373,10 @@ def assign_validated_histories(database: Path, root_id: str | None = None) -> di
             root_id = str(row[0])
         root_symmetry = validate(root_id, [])
         if root_symmetry is None:
-            raise ValueError(f"book root {root_id} disagrees with local Tromp-Taylor replay")
+            raise ValueError(
+                f"book root {root_id} disagrees with local {ruleset.name} "
+                f"replay on {board_size}x{board_size}"
+            )
         connection.execute(
             """UPDATE nodes SET ply=0,history_json='[]',page_to_history_symmetry=?,valid=1
                WHERE node_id=?""",
@@ -388,8 +409,14 @@ def assign_validated_histories(database: Path, root_id: str | None = None) -> di
                     parent_link = child_row[1]
                     if parent_link is not None and _resolve_link(str(child_id), parent_link) != parent_id:
                         continue
-                    action = transform_action(int(page_action), 9, int(parent_symmetry))
-                    coord = "pass" if action == 81 else _coord_9x9(action)
+                    action = transform_action(
+                        int(page_action), board_size, int(parent_symmetry)
+                    )
+                    coord = (
+                        "pass"
+                        if action == board_size * board_size
+                        else _coord(action, board_size)
+                    )
                     child_history = history + [[next_player, coord]]
                     child_symmetry = validate(str(child_id), child_history)
                     if child_symmetry is None:
@@ -423,10 +450,10 @@ def assign_validated_histories(database: Path, root_id: str | None = None) -> di
         connection.close()
 
 
-def _coord_9x9(action: int) -> str:
+def _coord(action: int, board_size: int) -> str:
     from sakigo.generate.game import coord_from_index
 
-    return coord_from_index(action, 9)
+    return coord_from_index(action, board_size)
 
 
 def row_actions(row: dict[str, Any], board_size: int = 9) -> tuple[int, ...]:
@@ -456,7 +483,11 @@ def row_actions(row: dict[str, Any], board_size: int = 9) -> tuple[int, ...]:
     return tuple(sorted(set(actions)))
 
 
-def book_target_eligible(moves_json: str, next_player: str) -> bool:
+def book_target_eligible(
+    moves_json: str,
+    next_player: str,
+    board_size: int = 9,
+) -> bool:
     """Return whether a page can produce every active book-derived target."""
 
     from sakigo.generate.targets import round_half_point
@@ -465,7 +496,9 @@ def book_target_eligible(moves_json: str, next_player: str) -> bool:
         rows = json.loads(moves_json)
         concrete: list[tuple[float, float, float | None]] = []
         for row in rows:
-            if str(row.get("move", "")).lower() == "other" or not row_actions(row):
+            if str(row.get("move", "")).lower() == "other" or not row_actions(
+                row, board_size
+            ):
                 continue
             score_raw = next(
                 (
@@ -580,11 +613,12 @@ def freeze_uniform_sample(
     train_count: int,
     validation_count: int,
     seed: int,
+    board_size: int = 9,
 ) -> dict[str, int]:
     """Freeze an exact, uniform hash sample of valid canonical book nodes."""
 
-    if train_count <= 0 or validation_count <= 0:
-        raise ValueError("training and validation sample counts must be positive")
+    if train_count < 0 or validation_count < 0 or train_count + validation_count <= 0:
+        raise ValueError("sample counts must be non-negative with a positive total")
     connection = _connect(database)
     total = train_count + validation_count
 
@@ -598,7 +632,12 @@ def freeze_uniform_sample(
 
     connection.create_function("sample_hash", 1, sample_hash, deterministic=True)
     connection.create_function(
-        "target_eligible", 2, book_target_eligible, deterministic=True
+        "target_eligible",
+        2,
+        lambda moves_json, next_player: book_target_eligible(
+            moves_json, next_player, board_size
+        ),
+        deterministic=True,
     )
     try:
         connection.executescript(
@@ -674,6 +713,29 @@ def freeze_uniform_sample(
             "validation": validation_count,
             "total": total,
         }
+    finally:
+        connection.close()
+
+
+def count_book_target_eligible(database: Path, *, board_size: int = 9) -> int:
+    """Count validated nodes that can provide concrete policy and budget targets."""
+
+    connection = sqlite3.connect(database)
+    connection.create_function(
+        "target_eligible",
+        2,
+        lambda moves_json, next_player: book_target_eligible(
+            moves_json, next_player, board_size
+        ),
+        deterministic=True,
+    )
+    try:
+        return int(
+            connection.execute(
+                """SELECT COUNT(*) FROM nodes
+                   WHERE valid=1 AND target_eligible(moves_json,next_player)=1"""
+            ).fetchone()[0]
+        )
     finally:
         connection.close()
 

@@ -1,13 +1,17 @@
-# Distillation Artifacts
+# Distillation artifacts
 
-Downloaded KataGo engines, model weights, and release archives live under this
+Published small-board book archives, KataGo engines, model weights, and release archives live under this
 folder, but the artifact subdirectories are intentionally ignored by git:
 
-- `downloads/`: cached release archives.
+- `downloads/`: the six active 7×7/8×8/9×9 book archives and other cached downloads.
 - `engine/`: extracted KataGo engine packages.
 - `models/`: downloaded KataGo neural net weights.
 
-The phase-1 generator auto-detects a host-appropriate executable under
+The active pipeline reads the book archives directly and performs no KataGo
+inference. See `sakigo/generate/README.md` for the current command and target
+semantics.
+
+The retained legacy teacher generator auto-detects a host-appropriate executable under
 `Distillation/engine/*/`: `katago.exe` on Windows and `katago` on Linux/macOS.
 You can still pass `--katago` explicitly when choosing between multiple local
 engines.

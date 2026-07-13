@@ -103,7 +103,7 @@
 <section class="tab active" id="tab-map">
   <p class="hint">Click a node for its role, inputs/outputs, and invariants. Lanes run left to right.</p>
   <div class="card">
-    <div class="lane-title">Phase 1 data generation</div>
+    <div class="lane-title">Direct book data generation</div>
     <div class="flow" data-lane="gen"></div>
     <div class="lane-title">Training</div>
     <div class="flow" data-lane="train"></div>
@@ -116,9 +116,9 @@
 <!-- ======================= RECORD INSPECTOR ======================= -->
 <section class="tab" id="tab-record">
   <p class="hint">
-    Load a schema-v1 samples file (plain <code>.jsonl</code> only — browsers cannot read
+    Load a schema-v1 or schema-v2 samples file (plain <code>.jsonl</code> only — browsers cannot read
     <code>.jsonl.zst</code>; decompress one shard first, e.g.
-    <code>uv run python -c "from pathlib import Path; from Training.data import open_jsonl_text; p=Path('shard.jsonl.zst'); Path('shard.jsonl').write_text(open_jsonl_text(p).read())"</code>).
+    <code>uv run python -c "import zstandard as z; from pathlib import Path; p=Path('shard.jsonl.zst'); Path('shard.jsonl').write_bytes(z.ZstdDecompressor().decompress(p.read_bytes()))"</code>).
     Everything shown is from the <b>current player's perspective</b>.
   </p>
   <div class="card">
@@ -135,7 +135,7 @@
 
 <!-- ======================= METRICS ======================= -->
 <section class="tab" id="tab-metrics">
-  <p class="hint">Load a run's <code>metrics.csv</code> (Training/runs/&lt;run&gt;/metrics.csv). Toggle columns; x-axis is the training step.</p>
+  <p class="hint">Load a run's <code>metrics.csv</code> (<code>runs/&lt;run&gt;/metrics.csv</code>). Toggle columns; x-axis is the training step.</p>
   <div class="card">
     <input type="file" id="metrics-file" accept=".csv">
     <label style="margin-left:14px"><input type="checkbox" id="log-y"> log y</label>
@@ -167,63 +167,57 @@ document.querySelectorAll("nav button").forEach(btn => btn.onclick = () => {
 /* ---------- pipeline map ---------- */
 const NODES = [
   // generation lane
-  { lane:"gen", id:"katago", t:"KataGo engine", s:"Distillation/engine/",
-    role:"External teacher. Answers JSON analysis queries (maxVisits 1) with policy, ownership, and BLACK-perspective winrate/lead.",
-    inputs:["analysis query: moves, rules, komi, board size"],
-    outputs:["policy (N*N+1)", "ownership (N*N)", "rootInfo: rawWinrate / rawLead / rawDrawProb / rawNoResultProb"],
-    inv:["reportAnalysisWinratesAs = BLACK — every value must be converted to current-player perspective downstream"] },
-  { lane:"gen", id:"generator", t:"Phase 1 generator", s:"Training/generate_katago_phase1.py",
-    role:"Generates teacher-policy rollouts, queries KataGo per position, converts targets to the current player's perspective, and samples the next move from the teacher distribution.",
-    inputs:["ruleset/board/komi plan (GenerationPlan quotas)", "KataGo responses"],
-    outputs:["schema-v1 records", "status.json (atomic writes)", "SGF-style move lists"],
-    inv:["WDL length 4: win/draw/loss/no-result, current player", "score & ownership sign-flipped for White to move; score / board area",
-         "budget = normalized KataGo policy (smooth prior); policy = one-hot top-1 over legal budget",
-         "single-stone suicide illegal even when suicide is allowed (KataGo semantics; matches Rust engine)"] },
-  { lane:"gen", id:"shards", t:"Shards", s:"*.jsonl.zst (schema v1)",
-    role:"Numbered zstd-compressed JSONL shards (default 65,536 records each). One JSON object per line.",
-    inputs:["records from the generator"],
-    outputs:["board_planes 6·N² plane-major", "rule_features[10]", "wdl[4] / score / ownership", "policy & budget (N²+1, pass last)", "legal_mask (N²+1)"],
-    inv:["pass is the FINAL entry of every action-shaped vector", "row-major board points",
-         "planes: My, Opponent, Empty, Corner, Edge, NonTrivialIllegal"] },
+  { lane:"gen", id:"books", t:"Published books", s:"Distillation/downloads/*.tar.gz",
+    role:"Six frozen KataGo opening books: Tromp–Taylor and Japanese rules at 7×7, 8×8, and 9×9.",
+    inputs:["downloaded archives with expected identity"],
+    outputs:["streamed book HTML pages and concrete move rows"],
+    inv:["archive size must match the catalog; the artifact manifest records its digest", "generation performs no teacher inference, search, or continuation"] },
+  { lane:"gen", id:"index", t:"Per-book index", s:"sakigo/generate/book.py",
+    role:"Indexes and validates each book independently in SQLite. Histories are replayed through the engine before a row enters the sampling population.",
+    inputs:["book pages", "catalog rules, komi, and board size"],
+    outputs:["validated canonical positions", "book-row targets and provenance"],
+    inv:["rules, size, komi, history, and legal actions fail closed", "books may index concurrently without sharing mutable state"] },
+  { lane:"gen", id:"sample", t:"Frozen train + validation matrix", s:"sakigo/generate/multi_book_distillation.py",
+    role:"Reserves balanced board-size/ruleset validation cohorts, then draws training globally without replacement from the remaining eligible positions.",
+    inputs:["six validated populations", "train/validation totals and seed"],
+    outputs:["schema-v2 zstd JSONL shards", "exact shard manifest", "atomic status files"],
+    inv:["natural population proportions; no fixed per-book quota", "sample identity includes book, row, history, and symmetry", "provenance mismatches fail closed"] },
+  { lane:"gen", id:"shards", t:"Book records", s:"*.jsonl.zst (schema v2)",
+    role:"Numbered compressed JSONL shards containing current-player inputs and direct book targets.",
+    inputs:["frozen sampled positions"],
+    outputs:["board_planes 6·N²", "rule_features[10]", "wdl[4] / score", "policy & budget (N²+1, pass last)", "legal_mask", "book provenance"],
+    inv:["budget = normalized concrete AVisits", "policy = uniform over tied rounded-optimum concrete moves", "aggregate other contributes to WDL/score, never to action targets"] },
   // training lane
-  { lane:"train", id:"scan", t:"Metadata scan", s:"data.scan_jsonl_stream_metadata",
-    role:"One full pass counting records per split/board/ruleset. Deterministic split by hashing (seed, board, ruleset, position_key). Results cached next to the file, keyed on size+mtime+seed+val_fraction+boards; atomic cache writes.",
-    inputs:["shard paths"], outputs:["train/val counts", "board & ruleset histograms"],
-    inv:["split hashes the move SEQUENCE — transposed openings leak across splits (tracked risk)"] },
-  { lane:"train", id:"stream", t:"Streaming buffer", s:"data.StreamingJsonlBuffer",
-    role:"Bounded decoded-record buffer over the shards. Plain .jsonl gets a byte-offset index (random access, per-ruleset shuffled bags); .jsonl.zst streams through an eviction buffer with without-replacement pops and split-protected refills.",
-    inputs:["shards + metadata"], outputs:["ruleset-balanced record batches per split"],
-    inv:["val sampling (advance=false) never consumes the training stream", "each record seen ~once per pass"] },
-  { lane:"train", id:"loader", t:"Dataset + DataLoader", s:"StreamingRulesetAwareBatchDataset",
-    role:"Infinite IterableDataset yielding ruleset-balanced batches; optional per-sample D4 augmentation. collate_cpu numpy-stacks; DataLoader pins train batches.",
-    inputs:["streaming buffer"], outputs:["CPU batches: board, rules, targets, masks"],
-    inv:["D4 augmentation transforms every board-shaped field and never the pass entry or globals",
-         "train H2D copies are async; PinnedBatchKeeper holds pinned buffers until a CUDA event confirms the copy; eval collate is synchronous & unpinned"] },
-  { lane:"train", id:"model", t:"SakiGoModel", s:"Model/sakigo_model/",
+  { lane:"train", id:"prepare", t:"Tensor preparation", s:"sakigo/data/prepare.py",
+    role:"Converts only the manifest-listed record shards into an immutable mmap tensor generation, then atomically switches the prepared manifest.",
+    inputs:["exact JSONL shard list"], outputs:["prepared format v3 arrays and metadata"],
+    inv:["two-pass conversion bounds memory", "canonical sample identity is retained", "partial generations never become active"] },
+  { lane:"train", id:"loader", t:"Dataset + sampler", s:"sakigo/data/dataset.py",
+    role:"PreparedDataset serves mmap tensors; SizeGroupedBatchSampler emits one board size per batch with natural rules mixing and population-proportional batch tickets.",
+    inputs:["prepared generation"], outputs:["CPU batches: board, rules, targets, masks"],
+    inv:["sampler and augmentation state are checkpointed", "D4 transforms board-shaped fields but never globals or the pass entry", "exact control-state resume requires num_workers=0"] },
+  { lane:"train", id:"model", t:"SakiGoNet", s:"sakigo/model/",
     role:"D4-equivariant attention trunk: rules initialize registers, one broadcast conditions the board, plain equivariant board blocks apply canonical-frame RoPE attention, and one final gather feeds global heads.",
     inputs:["board planes 6·N², rule features 10"],
-    outputs:["policy & budget logits (N²+1)", "wdl logits (4)", "score", "ownership logits (N²)"],
-    inv:["spatial heads equivariant, global heads invariant", "raw logits in training — legality masking is inference-only",
-         "RegularLinear1x1 caches flattened kernels only for frozen (requires_grad=False) params"] },
-  { lane:"train", id:"loss", t:"Losses + optimizer", s:"losses.py · AdamW (fused)",
-    role:"Masked soft-CE (wdl/policy/budget), smooth-L1 (score), BCE (ownership); branchless masks normalize by clamped weight sums. AdamW with no-decay group for biases/norms; warmup-cosine or constant LR.",
+    outputs:["policy & budget logits (N²+1)", "wdl logits (4)", "score"],
+    inv:["spatial heads equivariant, global heads invariant", "the active model has no ownership head", "raw logits in training — legality masking is inference-only"] },
+  { lane:"train", id:"loss", t:"Losses + optimizer", s:"sakigo/train/ · fused AdamW",
+    role:"Soft cross-entropy for WDL, policy, and budget plus smooth-L1 score loss. AdamW separates decay/no-decay parameters; suites require eager/compiled optimizer-step parity.",
     inputs:["model outputs + batch targets/masks"], outputs:["weighted total loss", "per-head losses"],
-    inv:["no illegal-move masking at train time", "all-false mask contributes 0 loss with zero gradients"] },
-  { lane:"train", id:"ckpt", t:"Checkpoints + metrics", s:"checkpoints.py · metrics.csv",
-    role:"Atomic (write-then-rename) checkpoints with model/optimizer/scheduler/RNG state; CSV metrics rows on log steps with train and balanced-val averages.",
-    inputs:["training loop state"], outputs:["step_XXXXXX.pt", "metrics.csv rows"],
-    inv:["resume is a valid continuation but not a bit-exact stream replay", "validation measures the live model (stale-cache bug fixed 2026-07-03)"] },
+    inv:["no illegal-move masking at train time", "compile is fail-closed by default", "ownership BCE is absent"] },
+  { lane:"train", id:"ckpt", t:"Checkpoints + metrics", s:"sakigo/train/trainer.py",
+    role:"Schema-7 atomic safe checkpoints capture model, optimizer, scheduler, sampler, augmentation, and RNG state; aggregate and per-cohort metrics are mirrored to CSV and TensorBoard.",
+    inputs:["training loop state"], outputs:["step_XXXXXX.pt", "metrics.csv rows", "validation_metrics.csv cohort rows"],
+    inv:["num_workers=0 restores exact batch, augmentation, and RNG control state; backend numerics may not be bit-identical", "changed trajectory/data properties and optimizer incompatibility fail loudly", "safe loading uses weights_only"] },
   // eval lane
   { lane:"eval", id:"engine", t:"Rust engine", s:"Engine/src/",
-    role:"Rules ground truth: legality, captures, simple ko & positional superko, incremental 128-bit Zobrist. PositionHash = board only (repetition checks); StateHash adds to-move, ko point, captures, rules/komi (TT/NN key).",
-    inputs:["moves"], outputs:["legal moves", "board planes + rule features (encoder)", "hashes"],
-    inv:["capture counts must NEVER enter a repetition hash — every cycle strictly increases them",
-         "single-stone suicide always illegal (matches generator since 2026-07-06)",
-         "PyO3 binding parked in src/python.rs pending network"] },
+    role:"Rules and encoding ground truth exposed through the built Python binding: legality, captures, suicide, ko/superko, hashes, model inputs, and area scoring.",
+    inputs:["rules, position, and moves"], outputs:["legal moves", "board planes + rule features", "hashes", "area result"],
+    inv:["repetition hashes follow ko semantics; the separate state hash includes model-relevant metadata", "Python generation and evaluation use this engine rather than reimplementing the rules"] },
   { lane:"eval", id:"selfplay", t:"Paired policy eval", s:"sakigo/eval/",
-    role:"Paired color-reversed matches between checkpoint policies (or a random baseline): shared seeded openings, Tromp-Taylor adjudication at two passes or ply cap, Elo ± Wilson CI, SGF dumps.",
+    role:"Paired color-reversed matches between checkpoint policies (or a random baseline), using canonical book openings for the active 7×7, 8×8, and 9×9 sizes.",
     inputs:["two players (checkpoints / random)"], outputs:["games.jsonl, summary.json, SGFs"],
-    inv:["strength claims come from paired games, NOT val loss (val loss has anti-correlated with strength here)"] },
+    inv:["engine-owned area scoring", "draw and void outcomes remain distinct", "paired uncertainty is reported"] },
 ];
 const laneEls = {};
 document.querySelectorAll(".flow").forEach(el => laneEls[el.dataset.lane] = el);
@@ -338,12 +332,14 @@ function renderRecord() {
   tg.innerHTML = "<h2>Targets (current-player perspective)</h2>";
   const row2 = document.createElement("div"); row2.className = "boards";
   const maxB = Math.max(...r.budget.slice(0, area), r.budget[area], 1e-9);
-  row2.appendChild(boardBlock("budget (teacher policy)",
+  row2.appendChild(boardBlock("budget (normalized AVisits)",
     drawGrid(n, i => heat(r.budget[i] / maxB)), `pass = ${(r.budget[area]).toFixed(4)}`));
-  row2.appendChild(boardBlock("policy (top-1)",
-    drawGrid(n, i => heat(r.policy[i])), `pass = ${(r.policy[area]).toFixed(1)}`));
-  row2.appendChild(boardBlock("ownership", drawGrid(n, i => diverge(r.ownership[i])),
-    "blue = current player"));
+  row2.appendChild(boardBlock("policy (rounded-optimum ties)",
+    drawGrid(n, i => heat(r.policy[i])), `pass = ${(r.policy[area]).toFixed(4)}`));
+  if (Array.isArray(r.ownership)) {
+    row2.appendChild(boardBlock("legacy ownership", drawGrid(n, i => diverge(r.ownership[i])),
+      "blue = current player"));
+  }
   row2.appendChild(boardBlock("legal mask", drawGrid(n, i => r.legal_mask[i] ? heat(0.8) : "#20262d"),
     `pass legal = ${r.legal_mask[area]}`));
   tg.appendChild(row2);
@@ -373,7 +369,7 @@ function renderRecord() {
     ["suicide", SUICIDE[f.slice(6, 8).indexOf(1)] ?? "?"],
     ["signed komi ÷ area", f[8].toFixed(4) + `  (komi ${r.ruleset?.komi ?? "?"}, negative = Black to move)`],
     ["capture diff ÷ area", f[9].toFixed(4)],
-    ["teacher", r.source?.teacher ?? "?"],
+    ["source book", r.source?.book ?? r.source?.teacher ?? "?"],
   ];
   rows.forEach(([k, v]) => {
     const tr = document.createElement("tr");

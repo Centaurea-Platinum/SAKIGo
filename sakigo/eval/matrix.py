@@ -23,8 +23,11 @@ from sakigo.eval.selfplay import (
     SGF_LETTERS,
     elo_from_p,
     engine_final_score,
+    paired_mean_interval,
     wilson_interval,
 )
+from sakigo.generate.book import iter_frozen_sample
+from sakigo.generate.game import index_from_coord
 from sakigo.rulesets import RulesetSpec, ruleset_from_name
 
 
@@ -37,6 +40,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pairings", default=",".join(DEFAULT_PAIRINGS))
     parser.add_argument("--games-per-pairing", type=int, default=6)
     parser.add_argument("--opening-plies", type=int, default=6)
+    parser.add_argument(
+        "--book-index",
+        default="",
+        help="Optional indexed book database supplying canonical paired openings.",
+    )
+    parser.add_argument(
+        "--book-split",
+        default="validation",
+        choices=("train", "validation"),
+        help="Frozen book sample split used when --book-index is set.",
+    )
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--board-size", type=int, default=19)
     parser.add_argument("--ruleset", default="tromp-taylor")
@@ -73,6 +87,77 @@ def _random_opening(
         game.play(action)
         opening.append(action)
     return opening
+
+
+def _book_openings(
+    database: Path,
+    split: str,
+    count: int,
+    seed: int,
+    board_size: int,
+    opening_plies: int | None = None,
+) -> list[tuple[str, list[int]]]:
+    """Select deterministic canonical histories from a frozen book sample."""
+    tasks = list(iter_frozen_sample(database, split=split))
+    if count > len(tasks):
+        raise ValueError(
+            f"requested {count} book openings but split {split!r} contains only {len(tasks)}"
+        )
+    selected = random.Random(seed).sample(tasks, count)
+    openings: list[tuple[str, list[int]]] = []
+    for task in selected:
+        actions: list[int] = []
+        history = task["history"]
+        if opening_plies is not None:
+            history = history[:opening_plies]
+        for ply, (color, coord) in enumerate(history):
+            expected = "B" if ply % 2 == 0 else "W"
+            if str(color).upper() != expected:
+                raise ValueError(
+                    f"book node {task['node_id']} history color mismatch at ply {ply}: "
+                    f"expected {expected}, got {color}"
+                )
+            actions.append(index_from_coord(str(coord), board_size))
+        openings.append((str(task["node_id"]), actions))
+    return openings
+
+
+def _opening_pool(
+    args: argparse.Namespace,
+    ruleset: RulesetSpec,
+) -> tuple[str, list[tuple[str, list[int]]]]:
+    """Build one opening pool shared by every directed pairing."""
+    if args.book_index:
+        database = Path(args.book_index)
+        if not database.is_file():
+            raise FileNotFoundError(f"book index does not exist: {database}")
+        return (
+            f"book:{args.book_split}",
+            _book_openings(
+                database,
+                args.book_split,
+                args.games_per_pairing,
+                args.seed,
+                args.board_size,
+                args.opening_plies,
+            ),
+        )
+    rng = random.Random(args.seed)
+    return (
+        "random",
+        [
+            (
+                f"random-{index:06d}",
+                _random_opening(
+                    random.Random(rng.randrange(1 << 30)),
+                    args.opening_plies,
+                    args.board_size,
+                    ruleset,
+                ),
+            )
+            for index in range(args.games_per_pairing)
+        ],
+    )
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
@@ -119,6 +204,7 @@ class MatrixGame:
         max_plies: int | None,
         board_size: int,
         ruleset: RulesetSpec,
+        opening_id: str = "",
     ) -> None:
         self.game_index = game_index
         self.pairing = pairing
@@ -128,6 +214,8 @@ class MatrixGame:
         self.board_size = board_size
         self.ruleset = ruleset
         self.komi = ruleset.komi
+        self.opening_id = opening_id
+        self.opening_plies = len(opening)
         self.game = _new_game(board_size, ruleset)
         self.actions: list[int] = []
         self.passes = 0
@@ -243,6 +331,30 @@ def _summary(
         scored = len(group) - voids
         first_points = first_wins + 0.5 * draws
         low, high = wilson_interval(first_points, scored)
+        opening_groups: dict[str, list[MatrixGame]] = defaultdict(list)
+        for game in group:
+            opening_groups[game.opening_id].append(game)
+        paired_scores: list[float] = []
+        paired_margins: list[float] = []
+        void_opening_pairs = 0
+        for opening_games in opening_groups.values():
+            if len(opening_games) != 2 or {game.pairing for game in opening_games} != {
+                first + second,
+                second + first,
+            }:
+                continue
+            if any(game.ended_by == "max_plies" for game in opening_games):
+                void_opening_pairs += 1
+                continue
+            first_score = 0.0
+            first_margin = 0.0
+            for game in opening_games:
+                winner = game.winner()
+                first_score += 1.0 if winner == first else 0.5 if winner is None else 0.0
+                first_margin += game.score if game.black_label == first else -game.score
+            paired_scores.append(first_score / 2.0)
+            paired_margins.append(first_margin / 2.0)
+        paired_low, paired_high = paired_mean_interval(paired_scores)
         unordered[key] = {
             "games": len(group),
             "labels": [first, second],
@@ -254,6 +366,15 @@ def _summary(
             "winrate_first_label_ci95": [low, high],
             "elo_first_label_minus_second": elo_from_p(first_points / scored) if scored else 0.0,
             "elo_ci95": [elo_from_p(low), elo_from_p(high)],
+            "paired_openings": len(paired_scores),
+            "void_opening_pairs": void_opening_pairs,
+            "paired_score_first_label": (
+                sum(paired_scores) / len(paired_scores) if paired_scores else 0.0
+            ),
+            "paired_score_first_label_ci95": [paired_low, paired_high],
+            "paired_mean_margin_first_minus_second": (
+                sum(paired_margins) / len(paired_margins) if paired_margins else 0.0
+            ),
         }
 
     return {
@@ -263,6 +384,8 @@ def _summary(
         "games_per_pairing": args.games_per_pairing,
         "games": len(games),
         "opening_plies": args.opening_plies,
+        "opening_source": "book:" + args.book_split if args.book_index else "random",
+        "book_index": args.book_index or None,
         "temperature": args.temperature,
         "board_size": args.board_size,
         "komi": args.komi,
@@ -282,6 +405,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     if args.games_per_pairing <= 0:
         raise ValueError("games-per-pairing must be positive")
+    if args.opening_plies < 0:
+        raise ValueError("opening-plies must be non-negative")
     if args.board_size <= 0 or args.batch_size <= 0:
         raise ValueError("board-size and batch-size must be positive")
     if not math.isfinite(args.komi):
@@ -297,7 +422,6 @@ def main(argv: list[str] | None = None) -> None:
         else torch.device(args.device)
     )
     torch.manual_seed(args.seed)
-    rng = random.Random(args.seed)
     ruleset = ruleset_from_name(args.ruleset).with_komi(args.komi)
     if ruleset.scoring != "area":
         raise ValueError(
@@ -322,15 +446,11 @@ def main(argv: list[str] | None = None) -> None:
     }
     player_names = {label: path.parent.parent.name for label, path in checkpoint_paths.items()}
 
+    opening_source, opening_pool = _opening_pool(args, ruleset)
+
     games: list[MatrixGame] = []
     for pairing in pairings:
-        for _ in range(args.games_per_pairing):
-            opening = _random_opening(
-                random.Random(rng.randrange(1 << 30)),
-                args.opening_plies,
-                args.board_size,
-                ruleset,
-            )
+        for opening_id, opening in opening_pool:
             games.append(
                 MatrixGame(
                     len(games),
@@ -339,6 +459,7 @@ def main(argv: list[str] | None = None) -> None:
                     max_plies,
                     args.board_size,
                     ruleset,
+                    opening_id,
                 )
             )
 
@@ -351,6 +472,7 @@ def main(argv: list[str] | None = None) -> None:
             "pairings": list(pairings),
             "ruleset": ruleset.metadata(),
             "max_plies_effective": max_plies,
+            "opening_source": opening_source,
             "run_dir": str(run_dir),
         },
     )
@@ -385,6 +507,7 @@ def main(argv: list[str] | None = None) -> None:
                     "pairings": list(pairings),
                     "ruleset": ruleset.metadata(),
                     "max_plies_effective": max_plies,
+                    "opening_source": opening_source,
                     "run_dir": str(run_dir),
                     "updated": datetime.now().isoformat(timespec="seconds"),
                 },
@@ -422,6 +545,8 @@ def main(argv: list[str] | None = None) -> None:
                         "score_black_minus_white": game.score,
                         "plies": game.ply,
                         "ended_by": game.ended_by,
+                        "opening_id": game.opening_id,
+                        "opening_plies": game.opening_plies,
                         "actions": game.actions,
                     }
                 )

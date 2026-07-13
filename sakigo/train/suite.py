@@ -28,8 +28,9 @@ from typing import Any
 import torch
 
 from sakigo.data import PreparedDataset, load_manifest, prepare_tensor_shards
-from sakigo.train.benchmark import benchmark_batch_size
+from sakigo.train.benchmark import benchmark_batch_candidate
 from sakigo.train.config import TrainConfig
+from sakigo.train.losses import LossWeights
 from sakigo.train.trainer import Trainer, resolve_device
 
 DEFAULT_SPECS = ("narrow-deep", "balanced", "wide-shallow")
@@ -77,6 +78,7 @@ class SuiteConfig:
     progress: bool = True
     lr: float = 3e-4
     weight_decay: float = 0.01
+    grad_clip: float = 1.0
     warmup_steps: int = 100
     wdl_weight: float = 1.0
     score_weight: float = 1.0
@@ -157,6 +159,14 @@ def _manifest_counts(manifest: dict[str, object]) -> tuple[int, int]:
         elif split == "val":
             val_records += count
     return train_records, val_records
+
+
+def _manifest_validation_batches(manifest: dict[str, object], batch_size: int) -> int:
+    groups = manifest.get("validation_groups")
+    if isinstance(groups, list) and groups:
+        return sum(math.ceil(int(group["count"]) / batch_size) for group in groups)
+    _, val_records = _manifest_counts(manifest)
+    return math.ceil(val_records / batch_size) if val_records else 0
 
 
 def _status_payload(
@@ -257,11 +267,10 @@ def choose_batch_size(
     config: SuiteConfig,
     paths: SuitePaths,
 ) -> tuple[int, list[dict[str, Any]]]:
-    if config.batch_size > 0:
-        return config.batch_size, []
     if not config.specs:
         raise ValueError("suite needs at least one model spec")
 
+    explicit = config.batch_size > 0
     device = resolve_device(config.device)
     torch.manual_seed(config.seed)
     random.seed(config.seed)
@@ -273,10 +282,17 @@ def choose_batch_size(
             * config.benchmark_budget_fraction
         )
     dataset = PreparedDataset(paths.prepared, "train")
+    loss_weights = LossWeights(
+        wdl=config.wdl_weight,
+        score=config.score_weight,
+        policy=config.policy_weight,
+        budget=config.budget_weight,
+    )
     results: list[dict[str, Any]] = []
     best: tuple[int, float] | None = None
-    for batch_size in config.benchmark_batch_sizes:
-        if len(dataset) % batch_size != 0:
+    candidates = (config.batch_size,) if explicit else config.benchmark_batch_sizes
+    for batch_size in candidates:
+        if not explicit and len(dataset) % batch_size != 0:
             results.append(
                 {
                     "batch_size": batch_size,
@@ -290,7 +306,7 @@ def choose_batch_size(
         rates: list[float] = []
         stop_larger = False
         for spec in config.specs:
-            rate, peak, reason = benchmark_batch_size(
+            candidate = benchmark_batch_candidate(
                 spec,
                 dataset,
                 batch_size,
@@ -298,15 +314,22 @@ def choose_batch_size(
                 timed_steps=config.benchmark_timed_steps,
                 memory_budget=budget,
                 compile_mode=config.model_compile,
+                amp=config.amp,
+                loss_weights=loss_weights,
+                seed=config.seed,
+                lr=config.lr,
+                weight_decay=config.weight_decay,
+                grad_clip=config.grad_clip,
+                warmup_steps=config.warmup_steps,
             )
             per_spec.append(
                 {
                     "spec": spec,
-                    "samples_per_second": rate,
-                    "peak_bytes": peak,
-                    "reason": reason,
+                    **candidate,
                 }
             )
+            rate = candidate["samples_per_second"]
+            reason = candidate["reason"]
             if rate is not None:
                 rates.append(rate)
             if reason in {"over_budget", "oom"}:
@@ -326,6 +349,8 @@ def choose_batch_size(
         results.append(result)
         if aggregate is not None and (best is None or aggregate > best[1]):
             best = (batch_size, aggregate)
+        if explicit:
+            break
         if stop_larger:
             break
     sweep_path = paths.sweeps / "batch_size_all_models.json"
@@ -335,12 +360,26 @@ def choose_batch_size(
             "specs": list(config.specs),
             "device": str(device),
             "compile": config.model_compile,
+            "amp": config.amp,
+            "loss_weights": loss_weights.as_dict(),
+            "grad_clip": config.grad_clip,
+            "selection": "explicit_preflight" if explicit else "maximum_geometric_mean_throughput",
             "budget_fraction": config.benchmark_budget_fraction,
             "results": results,
             "best_batch_size": best[0] if best else None,
         },
     )
     if best is None:
+        if explicit:
+            reasons = [
+                f"{entry['spec']}={entry['reason']}"
+                for result in results
+                for entry in result.get("per_spec", [])
+            ]
+            detail = ", ".join(reasons) or "no model completed preflight"
+            raise RuntimeError(
+                f"explicit batch size {config.batch_size} failed mandatory safety preflight: {detail}"
+            )
         raise RuntimeError("batch-size benchmark found no candidate usable by every model")
     return best[0], results
 
@@ -373,6 +412,7 @@ def train_config_for_spec(
         batch_size=batch_size,
         lr=config.lr,
         weight_decay=config.weight_decay,
+        grad_clip=config.grad_clip,
         warmup_steps=config.warmup_steps,
         wdl_weight=config.wdl_weight,
         score_weight=config.score_weight,
@@ -427,7 +467,7 @@ def run_suite(config: SuiteConfig) -> dict[str, Any]:
             config,
             paths,
             state="running",
-            stage="benchmark_batch_size" if batch_size <= 0 else "planning",
+            stage="batch_safety_preflight",
             data_sources=data_sources,
             train_records=train_records,
             val_records=val_records,
@@ -437,8 +477,8 @@ def run_suite(config: SuiteConfig) -> dict[str, Any]:
         batch_size, benchmark_results = choose_batch_size(config, paths)
         steps = steps or math.ceil(train_records / batch_size)
         checkpoint_interval = config.checkpoint_interval or max(1, math.ceil(steps / 8))
-        val_batches = config.val_batches or (
-            math.ceil(val_records / batch_size) if val_records else 0
+        val_batches = config.val_batches or _manifest_validation_batches(
+            manifest, batch_size
         )
 
         for spec in config.specs:
@@ -522,12 +562,17 @@ def parse_args(argv: list[str] | None = None) -> SuiteConfig:
     parser.add_argument("--benchmark-timed-steps", type=int, default=8)
     parser.add_argument("--benchmark-budget-fraction", type=float, default=0.85)
     parser.add_argument("--checkpoint-interval", type=int, default=0)
-    parser.add_argument("--val-batches", type=int, default=0)
+    parser.add_argument(
+        "--val-batches",
+        type=int,
+        default=0,
+        help="Total cohort-balanced validation batch cap; 0 covers every cohort fully.",
+    )
     parser.add_argument(
         "--val-fixed",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Replay one fixed validation subset for each metrics row.",
+        help="Replay the same subset within every validation cohort for each metrics row.",
     )
     parser.add_argument(
         "--compile",
@@ -544,6 +589,7 @@ def parse_args(argv: list[str] | None = None) -> SuiteConfig:
     )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--wdl-weight", type=float, default=1.0)
     parser.add_argument("--score-weight", type=float, default=1.0)
@@ -576,6 +622,7 @@ def parse_args(argv: list[str] | None = None) -> SuiteConfig:
         progress=args.progress,
         lr=args.lr,
         weight_decay=args.weight_decay,
+        grad_clip=args.grad_clip,
         warmup_steps=args.warmup_steps,
         wdl_weight=args.wdl_weight,
         score_weight=args.score_weight,

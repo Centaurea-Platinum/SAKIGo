@@ -1,5 +1,5 @@
 > **Status: Not currently considered.** This note is retained only as a possible
-> future direction; current work is limited to KataGo-teacher distillation.
+> future direction; current work is limited to direct published-book distillation.
 
 6 planes:
     MyStones

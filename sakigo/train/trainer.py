@@ -5,9 +5,11 @@ viewer), tqdm, atomic weights_only-loadable checkpoints, and full RNG capture.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import time
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -19,10 +21,11 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from sakigo.data import (
-    FixedBatchSampler,
+    GroupedValidationBatchSampler,
     PreparedDataset,
-    RulesetBalancedBatchSampler,
+    SizeGroupedBatchSampler,
     batch_to_device,
+    load_manifest,
     make_dataloader,
     prepare_tensor_shards,
 )
@@ -32,21 +35,43 @@ from sakigo.model import (
     config_from_dict as model_config_from_dict,
     config_from_spec,
 )
-from sakigo.train.config import TrainConfig, config_from_dict as train_config_from_dict
+from sakigo.train.config import TrainConfig, validate_train_config
 from sakigo.train.losses import LossWeights, compute_head_losses, weighted_total_loss
 from sakigo.train.metrics import (
     MetricAccumulator,
     add_val_confusion,
     append_metrics,
+    append_validation_groups,
     metric_fields,
     prefixed,
     write_metrics_header,
+    write_validation_group_header,
 )
 
 def resolve_device(raw: str) -> torch.device:
     if raw == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(raw)
+
+
+def require_finite(label: str, value: torch.Tensor) -> None:
+    """Stop before a non-finite result can corrupt optimizer state."""
+    if not bool(torch.isfinite(value.detach()).all().item()):
+        raise FloatingPointError(f"non-finite {label}")
+
+
+def require_model_finite(model: nn.Module) -> None:
+    """Validate every trainable tensor after the optimizer's first update."""
+    for name, parameter in model.named_parameters():
+        require_finite(f"model parameter {name}", parameter)
+
+
+def require_optimizer_finite(optimizer: torch.optim.Optimizer) -> None:
+    """Validate tensor-valued optimizer state after it is first materialized."""
+    for parameter_index, state in optimizer.state.items():
+        for name, value in state.items():
+            if torch.is_tensor(value):
+                require_finite(f"optimizer state {name} for parameter {id(parameter_index)}", value)
 
 
 def optimizer_param_groups(model: nn.Module, weight_decay: float) -> list[dict[str, object]]:
@@ -104,8 +129,76 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+_EXACT_RESUME_FIELDS = (
+    "seed",
+    "val_fraction",
+    "num_workers",
+    "augment_d4",
+    "model_spec",
+    "steps",
+    "batch_size",
+    "lr",
+    "weight_decay",
+    "grad_clip",
+    "lr_schedule",
+    "warmup_steps",
+    "min_lr_ratio",
+    "amp",
+    "compile",
+    "wdl_weight",
+    "score_weight",
+    "policy_weight",
+    "budget_weight",
+)
+
+
+def _resume_properties(config: TrainConfig, device: torch.device) -> dict[str, object]:
+    properties = {name: getattr(config, name) for name in _EXACT_RESUME_FIELDS}
+    properties["board_weights"] = (
+        sorted((int(size), float(weight)) for size, weight in config.board_weights.items())
+        if config.board_weights is not None
+        else None
+    )
+    properties["device"] = str(device)
+    return properties
+
+
+def _prepared_manifest_identity(manifest: Mapping[str, object]) -> str:
+    raw_groups = manifest.get("groups")
+    if not isinstance(raw_groups, list):
+        raise ValueError("prepared manifest has no groups")
+    groups = []
+    for group in raw_groups:
+        if not isinstance(group, Mapping):
+            raise ValueError("prepared manifest has a malformed group")
+        groups.append(
+            {
+                "split": group.get("split"),
+                "board_size": group.get("board_size"),
+                "count": group.get("count"),
+            }
+        )
+    identity_payload = {
+        "prepare_format_version": manifest.get("prepare_format_version"),
+        "schema_version": manifest.get("schema_version"),
+        "seed": manifest.get("seed"),
+        "val_fraction": manifest.get("val_fraction"),
+        "split_mode": manifest.get("split_mode"),
+        "sources": manifest.get("sources"),
+        "ruleset_keys": manifest.get("ruleset_keys"),
+        "groups": groups,
+    }
+    encoded = json.dumps(
+        identity_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class Trainer:
     def __init__(self, config: TrainConfig) -> None:
+        config = validate_train_config(config)
         self.config = config
         self.device = resolve_device(config.device)
         torch.set_float32_matmul_precision("high")
@@ -122,6 +215,7 @@ class Trainer:
         self.run_dir = self._make_run_dir()
         self.checkpoint_dir = self.run_dir / "checkpoints"
         self.metrics_path = self.run_dir / "metrics.csv"
+        self.validation_metrics_path = self.run_dir / "validation_metrics.csv"
         self.compile_status = "off"
         self.log_interval = (
             config.checkpoint_interval if config.log_interval <= 0 else config.log_interval
@@ -132,8 +226,10 @@ class Trainer:
         self.optimizer = self._make_optimizer()
         self.scheduler = make_scheduler(self.optimizer, config)
         self.start_step = 0
+        self._optimizer_step_validated = False
         self._pending_sampler_state: dict[str, Any] | None = None
         self._pending_augmentation_state: dict[str, Any] | None = None
+        self._pending_prepared_identity: str | None = None
         if config.resume:
             self._resume(Path(config.resume))
         self.compiled_model = self._compile_model()
@@ -163,13 +259,19 @@ class Trainer:
         if self.config.compile == "off":
             return self.model
         mode = None if self.config.compile == "default" else self.config.compile
+        self.validation_batches = 0
+        self.validation_cohorts = {}
+        self.last_validation_groups = {}
         try:
             compiled = torch.compile(self.model, mode=mode)
-            self.compile_status = f"enabled:{self.config.compile}"
+            self.compile_status = f"pending_first_step:{self.config.compile}"
             return compiled
-        except Exception as error:  # noqa: BLE001 - fall back to eager, record why
+        except Exception as error:  # noqa: BLE001 - add context but never fall back
             self.compile_status = f"failed:{error}"
-            return self.model
+            raise RuntimeError(
+                f"model compilation failed for mode {self.config.compile!r}; "
+                "eager fallback is disabled"
+            ) from error
 
     def _prepare_data(self) -> None:
         config = self.config
@@ -195,9 +297,19 @@ class Trainer:
         else:
             raise ValueError("train config needs data sources or a prepared_dir")
         self.prepared_dir = prepared_dir
+        self.prepared_data_identity = _prepared_manifest_identity(
+            load_manifest(prepared_dir)
+        )
+        if (
+            self._pending_prepared_identity is not None
+            and self.prepared_data_identity != self._pending_prepared_identity
+        ):
+            raise ValueError(
+                "prepared data does not match the checkpoint; exact resume refused"
+            )
 
         self.train_dataset = PreparedDataset(prepared_dir, "train", augment_d4=config.augment_d4)
-        train_sampler = RulesetBalancedBatchSampler(
+        train_sampler = SizeGroupedBatchSampler(
             self.train_dataset,
             config.batch_size,
             seed=config.seed,
@@ -224,23 +336,21 @@ class Trainer:
             self.val_dataset = None
             self.val_loader = None
             return
-        val_sampler = RulesetBalancedBatchSampler(
+        val_sampler = GroupedValidationBatchSampler(
             self.val_dataset,
             config.batch_size,
             seed=config.seed + 1,
-            board_weights=config.board_weights,
+            length=config.val_batches,
+            fixed=config.val_fixed,
         )
-        # Rotating (default): each eval takes the next without-replacement chunk,
-        # covering the val set across evals. Fixed: replay one frozen subset for
-        # minimal step-to-step metric noise.
-        batch_sampler: FixedBatchSampler | RulesetBalancedBatchSampler = (
-            FixedBatchSampler.freeze(val_sampler, config.val_batches)
-            if config.val_fixed
-            else val_sampler
-        )
+        self.validation_cohorts = {
+            (cohort.board_size, cohort.ruleset_code): cohort
+            for cohort in val_sampler.cohorts
+        }
+        self.validation_batches = len(val_sampler)
         self.val_loader = make_dataloader(
             self.val_dataset,
-            batch_sampler,
+            val_sampler,
             num_workers=0,
             pin_memory=pin,
             seed=config.seed + 1,
@@ -256,6 +366,8 @@ class Trainer:
             "optimizer_state": self.optimizer.state_dict(),
             "model_config": asdict(self.model_config),
             "run_config": self.config.as_dict(),
+            "resume_properties": _resume_properties(self.config, self.device),
+            "prepared_data_identity": self.prepared_data_identity,
             "rng": {
                 "python": random.getstate(),
                 "torch": torch.get_rng_state(),
@@ -270,6 +382,8 @@ class Trainer:
         return payload
 
     def save_checkpoint(self, step: int) -> Path:
+        if type(step) is not int or step < 0:
+            raise ValueError("checkpoint step must be a non-negative integer")
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         path = self.checkpoint_dir / f"step_{step:06}.pt"
         tmp = path.with_name(path.name + ".tmp")
@@ -285,9 +399,24 @@ class Trainer:
                 f"checkpoint schema {version!r} is incompatible; expected "
                 f"{CHECKPOINT_SCHEMA_VERSION} for the book-only no-ownership model"
             )
-        if not payload.get("sampler_state_exact", False):
+        if payload.get("sampler_state_exact") is not True:
             raise ValueError(
                 "checkpoint sampler state is not exact; resume requires num_workers=0"
+            )
+        if self.config.num_workers != 0:
+            raise ValueError("exact resume requires current num_workers=0")
+        saved_properties = payload.get("resume_properties")
+        if not isinstance(saved_properties, Mapping):
+            raise ValueError("checkpoint has no exact-resume properties")
+        current_properties = _resume_properties(self.config, self.device)
+        if dict(saved_properties) != current_properties:
+            changed = sorted(
+                key
+                for key in set(saved_properties).union(current_properties)
+                if saved_properties.get(key) != current_properties.get(key)
+            )
+            raise ValueError(
+                "checkpoint resume properties changed: " + ", ".join(changed)
             )
         model_config = model_config_from_dict(payload["model_config"])
         if asdict(model_config) != asdict(self.model_config):
@@ -295,24 +424,70 @@ class Trainer:
             self.model = SakiGoNet(model_config).to(self.device)
             self.optimizer = self._make_optimizer()
             self.scheduler = make_scheduler(self.optimizer, self.config)
-        self.model.load_state_dict(payload["model_state"])
+        model_state = payload.get("model_state")
+        optimizer_state = payload.get("optimizer_state")
+        if not isinstance(model_state, Mapping) or not isinstance(
+            optimizer_state, Mapping
+        ):
+            raise ValueError("checkpoint is missing model or optimizer state")
+        self.model.load_state_dict(model_state)
         try:
-            self.optimizer.load_state_dict(payload["optimizer_state"])
+            self.optimizer.load_state_dict(optimizer_state)
         except ValueError as error:
-            print(f"warning: optimizer state not restored ({error})", flush=True)
-        if self.scheduler is not None and "scheduler_state" in payload:
+            raise RuntimeError(
+                "optimizer state restore failed; exact resume cannot continue"
+            ) from error
+        if self.scheduler is not None:
+            if "scheduler_state" not in payload:
+                raise ValueError("checkpoint is missing scheduler state")
             self.scheduler.load_state_dict(payload["scheduler_state"])
-        rng = payload.get("rng", {})
-        if "python" in rng:
-            state = rng["python"]
-            random.setstate((state[0], tuple(state[1]), state[2]))
-        if "torch" in rng:
-            torch.set_rng_state(rng["torch"].cpu().to(torch.uint8))
-        if rng.get("cuda") is not None and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all([state.cpu().to(torch.uint8) for state in rng["cuda"]])
-        self.start_step = int(payload["step"])
-        self._pending_sampler_state = payload.get("sampler_state")
-        self._pending_augmentation_state = payload.get("augmentation_state")
+        rng = payload.get("rng")
+        if not isinstance(rng, Mapping) or "python" not in rng or "torch" not in rng:
+            raise ValueError("checkpoint is missing RNG state")
+        python_state = rng["python"]
+        if not isinstance(python_state, (tuple, list)) or len(python_state) != 3:
+            raise ValueError("checkpoint has invalid Python RNG state")
+        random.setstate(
+            (python_state[0], tuple(python_state[1]), python_state[2])
+        )
+        torch_state = rng["torch"]
+        if not torch.is_tensor(torch_state):
+            raise ValueError("checkpoint has invalid torch RNG state")
+        torch.set_rng_state(torch_state.cpu().to(torch.uint8))
+        cuda_state = rng.get("cuda")
+        if self.device.type == "cuda":
+            if not isinstance(cuda_state, (tuple, list)):
+                raise ValueError("checkpoint is missing CUDA RNG state")
+            torch.cuda.set_rng_state_all(
+                [state.cpu().to(torch.uint8) for state in cuda_state]
+            )
+        raw_step = payload.get("step")
+        if type(raw_step) is not int or raw_step < 0:
+            raise ValueError("checkpoint step must be a non-negative integer")
+        self.start_step = raw_step
+        if self.start_step > self.config.steps:
+            raise ValueError(
+                f"checkpoint step {self.start_step} exceeds configured steps "
+                f"{self.config.steps}"
+            )
+        sampler_state = payload.get("sampler_state")
+        if not isinstance(sampler_state, Mapping):
+            raise ValueError("checkpoint is missing sampler state")
+        self._pending_sampler_state = dict(sampler_state)
+        augmentation_state = payload.get("augmentation_state")
+        if self.config.augment_d4 and not isinstance(augmentation_state, Mapping):
+            raise ValueError("checkpoint is missing augmentation RNG state")
+        if not self.config.augment_d4 and augmentation_state is not None:
+            raise ValueError("checkpoint has unexpected augmentation RNG state")
+        self._pending_augmentation_state = (
+            dict(augmentation_state)
+            if isinstance(augmentation_state, Mapping)
+            else None
+        )
+        prepared_identity = payload.get("prepared_data_identity")
+        if not isinstance(prepared_identity, str) or not prepared_identity:
+            raise ValueError("checkpoint is missing prepared-data identity")
+        self._pending_prepared_identity = prepared_identity
 
     # -- steps ---------------------------------------------------------------
 
@@ -324,23 +499,44 @@ class Trainer:
     def train_step(self, batch: dict[str, torch.Tensor]) -> tuple[
         dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor
     ]:
-        self.compiled_model.train()
-        self.optimizer.zero_grad(set_to_none=True)
-        with self._autocast():
-            output = self.compiled_model(batch["board"], batch["rules"])
-            head_losses = compute_head_losses(output, batch)
-            total = weighted_total_loss(head_losses, self.loss_weights)
-        total.backward()
-        if self.config.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
-        self.optimizer.step()
-        if self.scheduler is not None:
-            self.scheduler.step()
-        return output, head_losses, total
+        pending_compiled_step = self.compile_status.startswith("pending_first_step:")
+        try:
+            self.compiled_model.train()
+            self.optimizer.zero_grad(set_to_none=True)
+            with self._autocast():
+                output = self.compiled_model(batch["board"], batch["rules"])
+                head_losses = compute_head_losses(output, batch)
+                total = weighted_total_loss(head_losses, self.loss_weights)
+            require_finite("training loss", total)
+            total.backward()
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(),
+                self.config.grad_clip if self.config.grad_clip > 0 else float("inf"),
+                error_if_nonfinite=True,
+            )
+            self.optimizer.step()
+            if not self._optimizer_step_validated:
+                require_model_finite(self.model)
+                require_optimizer_finite(self.optimizer)
+                self._optimizer_step_validated = True
+            if pending_compiled_step:
+                self.compile_status = f"enabled:{self.config.compile}"
+            if self.scheduler is not None:
+                self.scheduler.step()
+            return output, head_losses, total
+        except BaseException as error:
+            if pending_compiled_step:
+                self.compile_status = f"failed_first_step:{type(error).__name__}:{error}"
+                raise RuntimeError(
+                    "compiled first optimizer step failed; eager fallback is disabled"
+                ) from error
+            raise
 
     @torch.no_grad()
     def evaluate(self, batches: int) -> MetricAccumulator:
         accumulator = MetricAccumulator(self.loss_weights)
+        group_accumulators: dict[tuple[int, int], MetricAccumulator] = {}
+        self.last_validation_groups = group_accumulators
         if self.val_loader is None or batches <= 0:
             return accumulator
         self.compiled_model.eval()
@@ -350,11 +546,34 @@ class Trainer:
                 batch = batch_to_device(next(iterator), self.device)
             except StopIteration:  # fixed val sampler is finite
                 break
-            with self._autocast():
-                output = self.compiled_model(batch["board"], batch["rules"])
-                head_losses = compute_head_losses(output, batch)
-                total = weighted_total_loss(head_losses, self.loss_weights)
+            try:
+                with self._autocast():
+                    output = self.compiled_model(batch["board"], batch["rules"])
+                    head_losses = compute_head_losses(output, batch)
+                    total = weighted_total_loss(head_losses, self.loss_weights)
+            except BaseException as error:
+                if self.compile_status.startswith("pending_first_step:"):
+                    self.compile_status = (
+                        f"failed_initial_forward:{type(error).__name__}:{error}"
+                    )
+                    raise RuntimeError(
+                        "compiled initial validation forward failed; "
+                        "eager fallback is disabled"
+                    ) from error
+                raise
+            require_finite("validation loss", total)
             accumulator.add_batch(output, batch, head_losses, total)
+            board_sizes = torch.unique(batch["board_size"])
+            ruleset_codes = torch.unique(batch["ruleset_code"])
+            if board_sizes.numel() != 1 or ruleset_codes.numel() != 1:
+                raise RuntimeError(
+                    "validation batch crossed a board-size/ruleset cohort boundary"
+                )
+            cohort_key = (int(board_sizes.item()), int(ruleset_codes.item()))
+            group_accumulator = group_accumulators.setdefault(
+                cohort_key, MetricAccumulator(self.loss_weights)
+            )
+            group_accumulator.add_batch(output, batch, head_losses, total)
         return accumulator
 
     # -- loop ----------------------------------------------------------------
@@ -368,10 +587,34 @@ class Trainer:
     ) -> dict[str, float | int]:
         row: dict[str, float | int] = {"step": step}
         row.update(prefixed("train", train_accumulator.averages()))
-        val_accumulator = self.evaluate(self.config.val_batches)
+        val_accumulator = self.evaluate(self.validation_batches)
         if val_accumulator.steps:
             row.update(prefixed("val", val_accumulator.averages()))
             add_val_confusion(row, val_accumulator)
+            group_rows: list[dict[str, object]] = []
+            for cohort_key, accumulator in sorted(self.last_validation_groups.items()):
+                cohort = self.validation_cohorts[cohort_key]
+                averages = accumulator.averages()
+                averages.pop("records", None)
+                group_rows.append(
+                    {
+                        "step": step,
+                        "board_size": cohort.board_size,
+                        "ruleset_name": cohort.ruleset_name,
+                        "komi": cohort.komi,
+                        "ruleset_key": cohort.ruleset_key,
+                        "records": accumulator.records,
+                        "batches": accumulator.steps,
+                        **averages,
+                    }
+                )
+                for metric, value in averages.items():
+                    if metric == "records" or value != value:
+                        continue
+                    writer.add_scalar(
+                        f"val_groups/{metric}/{cohort.metric_name}", value, step
+                    )
+            append_validation_groups(self.validation_metrics_path, group_rows)
         for field in metric_fields():
             value = row.get(field)
             if value is None or (isinstance(value, float) and value != value):
@@ -384,17 +627,20 @@ class Trainer:
         append_metrics(self.metrics_path, row)
         return row
 
-    def _write_status(self, step: int, state: str) -> None:
+    def _write_status(self, step: int, state: str, *, error: str | None = None) -> None:
+        payload = {
+            "state": state,
+            "step": step,
+            "total_steps": self.config.steps,
+            "compile": self.compile_status,
+            "device": str(self.device),
+            "updated": datetime.now().isoformat(timespec="seconds"),
+        }
+        if error is not None:
+            payload["error"] = error
         _atomic_write_json(
             self.run_dir / "status.json",
-            {
-                "state": state,
-                "step": step,
-                "total_steps": self.config.steps,
-                "compile": self.compile_status,
-                "device": str(self.device),
-                "updated": datetime.now().isoformat(timespec="seconds"),
-            },
+            payload,
         )
 
     def train(self) -> Path:
@@ -405,50 +651,66 @@ class Trainer:
         )
         if self.start_step == 0 and not self.metrics_path.exists():
             write_metrics_header(self.metrics_path)
+        if not self.validation_metrics_path.exists():
+            write_validation_group_header(self.validation_metrics_path)
         writer = SummaryWriter(log_dir=str(self.run_dir / "tb"))
-        accumulator = MetricAccumulator(self.loss_weights)
-        iterator: Iterator[dict[str, torch.Tensor]] = iter(self.train_loader)
-
-        if self.start_step == 0:
-            self.save_checkpoint(0)
-            self._log_row(0, accumulator, writer, 0.0)
-
-        progress = tqdm(
-            range(self.start_step + 1, config.steps + 1),
-            initial=self.start_step,
-            total=config.steps,
-            disable=not config.progress,
-            unit="step",
-            dynamic_ncols=True,
-        )
-        window_start = time.monotonic()
-        window_samples = 0
         last_step = self.start_step
-        for step in progress:
-            batch = batch_to_device(next(iterator), self.device)
-            output, head_losses, total = self.train_step(batch)
-            accumulator.add_batch(output, batch, head_losses, total)
-            window_samples += batch["board"].shape[0]
-            last_step = step
+        progress = None
+        try:
+            accumulator = MetricAccumulator(self.loss_weights)
+            iterator: Iterator[dict[str, torch.Tensor]] = iter(self.train_loader)
 
-            if step % self.log_interval == 0 or step == config.steps:
-                elapsed = max(time.monotonic() - window_start, 1e-9)
-                row = self._log_row(step, accumulator, writer, window_samples / elapsed)
-                progress.set_postfix(
-                    loss=f"{float(row.get('train_loss', float('nan'))):.4f}",
-                    val=f"{float(row.get('val_loss', float('nan'))):.4f}",
-                )
-                accumulator = MetricAccumulator(self.loss_weights)
-                self._write_status(step, "running")
-                window_start = time.monotonic()
-                window_samples = 0
-            if step % config.checkpoint_interval == 0 and step != config.steps:
-                self.save_checkpoint(step)
+            if self.start_step == 0:
+                self.save_checkpoint(0)
+                self._log_row(0, accumulator, writer, 0.0)
 
-        final_path = self.save_checkpoint(last_step)
-        self._write_status(last_step, "finished")
-        writer.close()
-        return final_path
+            progress = tqdm(
+                range(self.start_step + 1, config.steps + 1),
+                initial=self.start_step,
+                total=config.steps,
+                disable=not config.progress,
+                unit="step",
+                dynamic_ncols=True,
+            )
+            window_start = time.monotonic()
+            window_samples = 0
+            for step in progress:
+                batch = batch_to_device(next(iterator), self.device)
+                output, head_losses, total = self.train_step(batch)
+                accumulator.add_batch(output, batch, head_losses, total)
+                window_samples += batch["board"].shape[0]
+                last_step = step
+
+                if step % self.log_interval == 0 or step == config.steps:
+                    elapsed = max(time.monotonic() - window_start, 1e-9)
+                    row = self._log_row(
+                        step, accumulator, writer, window_samples / elapsed
+                    )
+                    progress.set_postfix(
+                        loss=f"{float(row.get('train_loss', float('nan'))):.4f}",
+                        val=f"{float(row.get('val_loss', float('nan'))):.4f}",
+                    )
+                    accumulator = MetricAccumulator(self.loss_weights)
+                    self._write_status(step, "running")
+                    window_start = time.monotonic()
+                    window_samples = 0
+                if step % config.checkpoint_interval == 0 and step != config.steps:
+                    self.save_checkpoint(step)
+
+            final_path = self.save_checkpoint(last_step)
+            self._write_status(last_step, "finished")
+            return final_path
+        except BaseException as error:
+            self._write_status(
+                last_step,
+                "failed",
+                error=f"{type(error).__name__}: {error}",
+            )
+            raise
+        finally:
+            if progress is not None:
+                progress.close()
+            writer.close()
 
 
 def train_from_config(config: TrainConfig) -> Path:

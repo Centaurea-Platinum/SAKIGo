@@ -10,29 +10,29 @@ One JSON object per line. Fields (targets may nest under `targets`):
 | Field | Type / shape | Notes |
 |---|---|---|
 | `schema_version` | int = 1 or 2 | v2 permits equal-optimal soft policy targets |
-| `board_size` | int N | square boards only |
-| `ply` | int | |
-| `position_key` | str | sha1[:20] of moves + to_move |
+| `board_size` | JSON int N | square boards only; booleans/floats/strings are rejected |
+| `ply` | JSON int | booleans/floats/strings are rejected |
+| `position_key` | str | non-empty provenance key; current book records use a BLAKE2b digest of the model-visible input |
 | `ruleset` | object | `RulesetSpec.metadata()`: name, katago_rules, katago_ko, katago_suicide, saki_scoring, saki_ko, saki_suicide, komi |
 | `board_planes` | float[6·N²] flat | plane order below, **mover perspective** |
 | `rule_features` | float[10] | encoding below |
 | `wdl` | float[4] | win/draw/loss/no_result, **mover perspective** |
 | `score` | float | mover-perspective lead **÷ board area** |
-| `ownership` | float[N²] ∈ [−1,1] | mover perspective (+1 = mine) |
-| `policy` | float[N²+1] | teacher-optimal distribution; **pass = last index** |
-| `budget` | float[N²+1] | full teacher policy renormalized over legal moves |
+| `ownership` | float[N²] ∈ [−1,1] | optional legacy target, mover perspective (+1 = mine); absent from current book records |
+| `policy` | float[N²+1] | action distribution; current books use uniform tied rounded-optimum concrete moves; **pass = last index** |
+| `budget` | float[N²+1] | action distribution; current books normalize concrete `AVisits` after discarding `other` |
 | `legal_mask` | bool[N²+1] | JSON booleans only; pass last and always true |
 | `source` | object | provenance, not consumed by training |
 
 Every target is optional per record; absent targets get mask=False in batches.
 Schema v1 retains the original strictly one-hot policy invariant. Schema v2 is
-used by book distillation: policy is one-hot for continuation records and
-uniform across rounded-equal optimal book moves. Both action targets must
+used by book distillation and permits policy mass to be uniform across
+rounded-equal optimal book moves. Both action targets must
 assign zero mass to actions rejected by `legal_mask`.
 
 Migration: v1 readers remain valid for legacy generated data. Readers that
-consume the 9×9 book dataset must accept v2 distributions; all other fields and
-batch layouts are unchanged.
+consume the mixed small-board book dataset must accept v2 distributions; all
+other fields and batch layouts are unchanged.
 
 ## 2. Board planes (index order)
 
@@ -72,12 +72,21 @@ Total = Σ weight_h · loss_h.
 
 ## 6. Train/val split
 
-Prepared-data format v2 splits on a canonical identity of the exact model
+Prepared-data format v3 splits on a canonical identity of the exact model
 input: the little-endian float32 bytes of `board_planes` followed by
 `rule_features`, then blake2b over `(seed, board_size, ruleset_key,
-canonical_input_key)`. `position_key` remains move-path provenance only. This
+canonical_input_key)`. `position_key` remains record provenance and is not
+trusted as the canonical split key. This
 keeps transposed move sequences that reach the same model-visible position in
 the same split.
+
+Prepared manifests enumerate every validation `(board_size, ruleset_key)`
+cohort. Validation batching never crosses a cohort boundary and a positive
+`val_batches` cap must allocate at least one batch to every cohort. Runs record
+aggregate metrics in `metrics.csv` and long-form per-cohort loss curves in
+`validation_metrics.csv`; the same curves are written under `val_groups/` in
+TensorBoard. Training batches remain grouped only by board size and preserve
+the natural ruleset mixture.
 
 ## 7. Checkpoint payload (rebuilt trainer)
 
@@ -87,8 +96,11 @@ the same split.
 `rng` (python/torch/cuda states), `sampler_state`,
 `augmentation_state`, `sampler_state_exact`, `checkpoint_schema_version` (=7).
 Written atomically (tmp + rename) as `checkpoints/step_%06d.pt`.
-Exact batch-order resume requires checkpoints produced with `num_workers=0`;
-the trainer rejects non-exact prefetched sampler states.
+Exact sampler, augmentation, and RNG continuation requires checkpoints produced
+and resumed with `num_workers=0`; the trainer rejects changed trajectory
+properties, prepared-data identity, optimizer state, and prefetched sampler
+states. Backend kernels may still be numerically non-bit-reproducible, so this
+is batch/control-state exactness rather than a promise of bit-identical weights.
 
 Schema 7 retains schema 6's no-ownership model and restores exact sampler and
 augmentation state required for batch-identical resume. Earlier model and
@@ -101,6 +113,7 @@ runs/<name>/
   config.json          # resolved run config
   tb/                  # TensorBoard event files
   metrics.csv          # thin mirror for the HTML viewer
+  validation_metrics.csv # long-form board-size/ruleset validation curves
   checkpoints/step_%06d.pt
   status.json          # heartbeat for orchestration
 ```

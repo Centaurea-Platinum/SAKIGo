@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from sakigo.engine import ENGINE_AVAILABLE
-from sakigo.eval.matrix import MatrixGame
+from sakigo.eval.matrix import MatrixGame, _book_openings
 from sakigo.eval.selfplay import MatchGame, load_policy_model, paired_mean_interval
 from sakigo.rulesets import ruleset_from_name
 
@@ -60,3 +60,63 @@ def test_matrix_rejects_unsupported_ancient_chinese_scoring() -> None:
     game.play(1)
     with pytest.raises(ValueError, match="Tromp-Taylor"):
         game.play(1)
+
+
+@pytest.mark.parametrize("board_size", [7, 8, 9])
+def test_book_openings_are_deterministic_across_active_board_sizes(
+    tmp_path: Path, board_size: int,
+) -> None:
+    import sqlite3
+
+    database = tmp_path / "book.sqlite"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE nodes(
+          node_id TEXT PRIMARY KEY,
+          next_player TEXT NOT NULL,
+          parent_link TEXT,
+          parent_symmetry INTEGER NOT NULL,
+          board_json TEXT NOT NULL,
+          moves_json TEXT NOT NULL,
+          ply INTEGER,
+          history_json TEXT,
+          page_to_history_symmetry INTEGER,
+          valid INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE sampled_nodes(
+          task_index INTEGER PRIMARY KEY,
+          split TEXT NOT NULL,
+          node_id TEXT NOT NULL UNIQUE
+        );
+        """
+    )
+    rows = [
+        ("a", "W", 1, f'[["B","A{board_size}"]]'),
+        (
+            "b",
+            "B",
+            2,
+            f'[["B","B{board_size}"],["W","C{board_size}"]]'
+        ),
+    ]
+    for index, (node_id, next_player, ply, history) in enumerate(rows):
+        connection.execute(
+            "INSERT INTO nodes VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (node_id, next_player, None, 0, "[]", "[]", ply, history, 0, 1),
+        )
+        connection.execute(
+            "INSERT INTO sampled_nodes VALUES(?,?,?)",
+            (index, "validation", node_id),
+        )
+    connection.commit()
+    connection.close()
+
+    first = _book_openings(database, "validation", 2, 7, board_size)
+    second = _book_openings(database, "validation", 2, 7, board_size)
+    assert first == second
+    assert {node_id for node_id, _ in first} == {"a", "b"}
+    assert {tuple(actions) for _, actions in first} == {(0,), (1, 2)}
+
+    truncated = _book_openings(database, "validation", 2, 7, board_size, 1)
+    assert all(len(actions) == 1 for _, actions in truncated)

@@ -22,13 +22,17 @@ from sakigo.generate.targets import (
 from sakigo.rulesets import BLACK, RulesetSpec
 
 
-def replay(history: list[list[str]], ruleset: RulesetSpec) -> GeneratorGame:
-    game = GeneratorGame(0, random.Random(0), 9, ruleset)
+def replay(
+    history: list[list[str]],
+    ruleset: RulesetSpec,
+    board_size: int = 9,
+) -> GeneratorGame:
+    game = GeneratorGame(0, random.Random(0), board_size, ruleset)
     for color, coord in history:
         expected = "B" if game.to_move == BLACK else "W"
         if color.upper() != expected:
             raise ValueError(f"history color mismatch: expected {expected}, got {color}")
-        game.play(index_from_coord(coord, 9))
+        game.play(index_from_coord(coord, board_size))
     return game
 
 
@@ -48,14 +52,19 @@ def _row_number(row: dict[str, Any], *names: str) -> float | None:
     return None
 
 
-def concrete_book_moves(task: dict[str, Any]) -> list[ConcreteBookMove]:
+def concrete_book_moves(
+    task: dict[str, Any],
+    board_size: int = 9,
+) -> list[ConcreteBookMove]:
     symmetry = int(task.get("page_to_history_symmetry", 0))
     output: list[ConcreteBookMove] = []
     for row in task["moves"]:
         label = str(row.get("move", "")).lower()
-        actions = row_actions(row)
+        actions = row_actions(row, board_size)
         if symmetry:
-            actions = tuple(transform_action(action, 9, symmetry) for action in actions)
+            actions = tuple(
+                transform_action(action, board_size, symmetry) for action in actions
+            )
         ss_m = _row_number(row, "ssM", "scoreMean", "score")
         output.append(
             ConcreteBookMove(
@@ -70,15 +79,25 @@ def concrete_book_moves(task: dict[str, Any]) -> list[ConcreteBookMove]:
 
 
 def build_book_training_record(
-    task: dict[str, Any], *, ruleset: RulesetSpec
+    task: dict[str, Any],
+    *,
+    ruleset: RulesetSpec,
+    board_size: int = 9,
+    book_id: str = "book9x9tt-20260226",
 ) -> dict[str, Any]:
-    game = replay([list(move) for move in task["history"]], ruleset)
-    board_planes, rule_features, legal_mask = game.model_inputs()
-    moves = concrete_book_moves(task)
-    policy, rounded_black_score = book_policy(
-        moves, to_move=game.to_move, action_count=82
+    area = board_size * board_size
+    action_count = area + 1
+    game = replay(
+        [list(move) for move in task["history"]],
+        ruleset,
+        board_size,
     )
-    budget = book_budget(moves, action_count=82)
+    board_planes, rule_features, legal_mask = game.model_inputs()
+    moves = concrete_book_moves(task, board_size)
+    policy, rounded_black_score = book_policy(
+        moves, to_move=game.to_move, action_count=action_count
+    )
+    budget = book_budget(moves, action_count=action_count)
     optimal_wl = [
         move.wl
         for move in moves
@@ -92,7 +111,7 @@ def build_book_training_record(
     mover_score = rounded_black_score if game.to_move == BLACK else -rounded_black_score
     return {
         "schema_version": DISTILLATION_SCHEMA_VERSION,
-        "board_size": 9,
+        "board_size": board_size,
         "ply": game.ply,
         "position_key": model_visible_position_key(game),
         "ruleset": ruleset.metadata(),
@@ -103,7 +122,7 @@ def build_book_training_record(
             to_move=game.to_move,
             book_wl=sum(optimal_wl) / len(optimal_wl),
         ),
-        "score": mover_score / 81,
+        "score": mover_score / area,
         "policy": policy,
         "budget": budget,
         "legal_mask": legal_mask,
@@ -113,6 +132,6 @@ def build_book_training_record(
             "task_id": task["task_id"],
             "task_index": task["task_index"],
             "node_id": task["node_id"],
-            "book": "book9x9tt-20260226",
+            "book": book_id,
         },
     }

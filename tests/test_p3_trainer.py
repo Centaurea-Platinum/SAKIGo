@@ -5,6 +5,7 @@ checkpoints are weights_only-loadable, and resume is deterministic.
 
 from __future__ import annotations
 
+import csv
 import json
 import random
 from pathlib import Path
@@ -13,8 +14,8 @@ import pytest
 import torch
 
 from sakigo.data import prepare_tensor_shards
-from sakigo.train.config import TrainConfig
-from sakigo.train.trainer import Trainer
+from sakigo.train.config import TrainConfig, validate_train_config
+from sakigo.train.trainer import Trainer, require_finite
 
 from tests.test_p2_data import _make_raw_record
 
@@ -123,6 +124,79 @@ def test_reduce_overhead_compilation_is_default() -> None:
     assert SuiteConfig(root=Path("suite")).model_compile == "reduce-overhead"
 
 
+def test_non_finite_losses_fail_fast() -> None:
+    require_finite("finite test value", torch.tensor(1.0))
+    with pytest.raises(FloatingPointError, match="non-finite training loss"):
+        require_finite("training loss", torch.tensor(float("nan")))
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (TrainConfig(batch_size=0), "batch_size"),
+        (TrainConfig(checkpoint_interval=0), "checkpoint_interval"),
+        (TrainConfig(lr=float("nan")), "lr"),
+        (
+            TrainConfig(
+                wdl_weight=0.0,
+                score_weight=0.0,
+                policy_weight=0.0,
+                budget_weight=0.0,
+            ),
+            "at least one loss weight",
+        ),
+    ],
+)
+def test_train_config_rejects_invalid_values(
+    config: TrainConfig, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        validate_train_config(config)
+
+
+def test_compile_failure_never_falls_back_to_eager(
+    workspace: dict[str, Path], spec_patch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_compile(*args, **kwargs):
+        raise RuntimeError("compiler unavailable")
+
+    monkeypatch.setattr(torch, "compile", fail_compile)
+    with pytest.raises(RuntimeError, match="eager fallback is disabled"):
+        Trainer(_config(workspace, "run_compile_failure", compile="default"))
+
+
+def test_lazy_compile_failure_is_reported_on_first_optimizer_step(
+    workspace: dict[str, Path], spec_patch
+) -> None:
+    class FailingCompiledModel(torch.nn.Module):
+        def forward(self, board, rules):
+            raise RuntimeError("synthetic lazy compiler failure")
+
+    trainer = Trainer(_config(workspace, "run_lazy_compile_failure"))
+    trainer.compiled_model = FailingCompiledModel()
+    trainer.compile_status = "pending_first_step:reduce-overhead"
+    batch = next(iter(trainer.train_loader))
+    with pytest.raises(RuntimeError, match="compiled first optimizer step failed"):
+        trainer.train_step(batch)
+    assert trainer.compile_status.startswith("failed_first_step:RuntimeError")
+
+
+def test_training_failure_writes_failed_status(
+    workspace: dict[str, Path], spec_patch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trainer = Trainer(_config(workspace, "run_failed_status", steps=1))
+
+    def fail_step(batch):
+        raise RuntimeError("synthetic training failure")
+
+    monkeypatch.setattr(trainer, "train_step", fail_step)
+    with pytest.raises(RuntimeError, match="synthetic training failure"):
+        trainer.train()
+    status = json.loads((trainer.run_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "failed"
+    assert "synthetic training failure" in status["error"]
+
+
 @pytest.fixture(scope="module")
 def spec_patch(workspace: dict[str, Path]):
     import sakigo.model.specs as specs_module
@@ -142,18 +216,33 @@ def test_trainer_smoke_run(workspace: dict[str, Path], spec_patch) -> None:
     assert (run_dir / "config.json").exists()
     assert (run_dir / "status.json").exists()
     assert (run_dir / "metrics.csv").exists()
+    assert (run_dir / "validation_metrics.csv").exists()
     assert list((run_dir / "tb").glob("events.out.tfevents.*"))
     status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "finished"
     assert status["step"] == 48
 
-    # train loss decreases (memorization on the small synthetic set)
+    # The randomly mixed sampler makes individual aggregate windows noisy;
+    # verify that both dense distribution heads memorize the synthetic set.
     lines = (run_dir / "metrics.csv").read_text(encoding="utf-8").strip().splitlines()
     header = lines[0].split(",")
     rows = [dict(zip(header, line.split(","))) for line in lines[1:]]
-    train_losses = [float(row["train_loss"]) for row in rows if row["train_loss"]]
-    assert len(train_losses) >= 2
-    assert train_losses[-1] < train_losses[0]
+    training_rows = [row for row in rows if row["train_loss"]]
+    assert len(training_rows) >= 2
+    assert float(training_rows[-1]["train_policy_loss"]) < float(
+        training_rows[0]["train_policy_loss"]
+    )
+    assert float(training_rows[-1]["train_budget_loss"]) < float(
+        training_rows[0]["train_budget_loss"]
+    )
+
+    validation_lines = (run_dir / "validation_metrics.csv").read_text(
+        encoding="utf-8"
+    ).strip().splitlines()
+    validation_rows = list(csv.DictReader(validation_lines))
+    cohorts = {(row["board_size"], row["ruleset_name"]) for row in validation_rows}
+    assert cohorts == {("5", "chinese"), ("5", "tromp-taylor")}
+    assert all(row["loss"] for row in validation_rows)
 
     # weights_only load must succeed (checkpoint contract)
     payload = torch.load(final, map_location="cpu", weights_only=True)
@@ -163,12 +252,10 @@ def test_trainer_smoke_run(workspace: dict[str, Path], spec_patch) -> None:
     assert payload["model_config"]["architecture"] == "SakiGoModel"
 
 
-def test_resume_is_deterministic(workspace: dict[str, Path], spec_patch) -> None:
-    full = Trainer(_config(workspace, "run_full", steps=16, checkpoint_interval=8))
-    final_full = full.train()
-
+def test_resume_restores_exact_control_state(workspace: dict[str, Path], spec_patch) -> None:
     part = Trainer(_config(workspace, "run_part", steps=16, checkpoint_interval=8))
-    part.train()
+    final_part = part.train()
+    continued_payload = torch.load(final_part, map_location="cpu", weights_only=True)
     midpoint = Path(part.run_dir) / "checkpoints" / "step_000008.pt"
     assert midpoint.exists()
     resumed = Trainer(
@@ -182,22 +269,89 @@ def test_resume_is_deterministic(workspace: dict[str, Path], spec_patch) -> None
     )
     final_resumed = resumed.train()
 
-    full_state = torch.load(final_full, map_location="cpu", weights_only=True)["model_state"]
-    resumed_state = torch.load(final_resumed, map_location="cpu", weights_only=True)["model_state"]
-    for key, value in full_state.items():
-        assert value.shape == resumed_state[key].shape, key
-    # Data order after resume differs (sampler state is not checkpointed), so
-    # exact equality is not required — but the resumed run must train stably.
+    resumed_payload = torch.load(final_resumed, map_location="cpu", weights_only=True)
+
+    def assert_state(left, right, label: str) -> None:
+        if torch.is_tensor(left):
+            if left.is_floating_point():
+                # Batch/RNG/control state is exact. Floating kernels may not be
+                # bit-reproducible, even across two uninterrupted CPU runs.
+                torch.testing.assert_close(left, right, rtol=1e-5, atol=2e-4, msg=label)
+            else:
+                torch.testing.assert_close(left, right, rtol=0, atol=0, msg=label)
+        elif isinstance(left, dict):
+            assert left.keys() == right.keys(), label
+            for key in left:
+                assert_state(left[key], right[key], f"{label}.{key}")
+        elif isinstance(left, (tuple, list)):
+            assert len(left) == len(right), label
+            for index, (left_item, right_item) in enumerate(zip(left, right)):
+                assert_state(left_item, right_item, f"{label}[{index}]")
+        else:
+            assert left == right, label
+
+    for section in (
+        "model_state",
+        "optimizer_state",
+        "scheduler_state",
+        "rng",
+        "sampler_state",
+        "augmentation_state",
+        "prepared_data_identity",
+    ):
+        assert_state(continued_payload[section], resumed_payload[section], section)
     status = json.loads((Path(resumed.run_dir) / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "finished" and status["step"] == 16
 
 
-def test_val_fixed_replays_identical_batches(workspace: dict[str, Path], spec_patch) -> None:
-    from sakigo.data import FixedBatchSampler
+def test_resume_rejects_changed_trajectory_property(
+    workspace: dict[str, Path], spec_patch
+) -> None:
+    source = Trainer(_config(workspace, "run_resume_properties", steps=1))
+    checkpoint = source.save_checkpoint(0)
+    with pytest.raises(ValueError, match="resume properties changed: batch_size"):
+        Trainer(
+            _config(
+                workspace,
+                "run_resume_properties",
+                steps=1,
+                batch_size=9,
+                resume=str(checkpoint),
+            )
+        )
+
+
+def test_resume_rejects_optimizer_state_failure(
+    workspace: dict[str, Path],
+    spec_patch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Trainer(_config(workspace, "run_resume_source", steps=1))
+    checkpoint = source.save_checkpoint(0)
+
+    def reject_state(self, state):
+        raise ValueError("synthetic optimizer mismatch")
+
+    monkeypatch.setattr(torch.optim.AdamW, "load_state_dict", reject_state)
+    with pytest.raises(RuntimeError, match="exact resume cannot continue"):
+        Trainer(
+            _config(
+                workspace,
+                "run_resume_rejected",
+                steps=1,
+                resume=str(checkpoint),
+            )
+        )
+
+
+def test_val_fixed_replays_identical_grouped_batches(
+    workspace: dict[str, Path], spec_patch
+) -> None:
+    from sakigo.data import GroupedValidationBatchSampler
 
     fixed = Trainer(_config(workspace, "run_valfixed", val_fixed=True))
     sampler = fixed.val_loader.batch_sampler
-    assert isinstance(sampler, FixedBatchSampler)
+    assert isinstance(sampler, GroupedValidationBatchSampler)
     assert len(sampler) == fixed.config.val_batches
     first = [list(batch) for batch in sampler]
     second = [list(batch) for batch in sampler]
@@ -206,12 +360,11 @@ def test_val_fixed_replays_identical_batches(workspace: dict[str, Path], spec_pa
     accumulator = fixed.evaluate(fixed.config.val_batches)
     assert accumulator.steps == fixed.config.val_batches
 
-    # default (rotating): consecutive draws continue the without-replacement
-    # cycle, so successive evals see different batches
-    rotating = Trainer(_config(workspace, "run_valrot"))
-    iterator = iter(rotating.val_loader.batch_sampler)
-    draw_a = [next(iterator) for _ in range(4)]
-    draw_b = [next(iterator) for _ in range(4)]
+    # default (rotating): successive evaluation iterators advance independently
+    # within every cohort while preserving cohort coverage.
+    rotating = Trainer(_config(workspace, "run_valrot", val_batches=2))
+    draw_a = list(rotating.val_loader.batch_sampler)
+    draw_b = list(rotating.val_loader.batch_sampler)
     assert draw_a != draw_b
 
 
@@ -251,7 +404,7 @@ def test_default_metrics_rows_follow_checkpoint_cadence(
             log_interval=0,
             checkpoint_interval=5,
             steps=10,
-            val_batches=1,
+            val_batches=2,
         )
     )
     trainer.train()
@@ -303,3 +456,86 @@ def test_suite_layout_uses_structured_train_dirs(
     assert train_config.log_interval == 0
     assert train_config.checkpoint_interval == 5
     assert train_config.score_weight == 81.0
+
+
+def test_explicit_suite_batch_still_runs_safety_preflight(
+    workspace: dict[str, Path], spec_patch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sakigo.train.suite as suite_module
+    from sakigo.train.suite import (
+        SuiteConfig,
+        build_suite_paths,
+        choose_batch_size,
+        ensure_suite_dirs,
+    )
+
+    seen: list[dict[str, object]] = []
+
+    def safe_candidate(spec, dataset, batch_size, device, **kwargs):
+        seen.append({"spec": spec, "batch_size": batch_size, **kwargs})
+        return {
+            "batch_size": batch_size,
+            "samples_per_second": 12.0,
+            "peak_allocated_bytes": 10,
+            "peak_reserved_bytes": 20,
+            "reason": "ok",
+            "safety": {"ok": True},
+        }
+
+    monkeypatch.setattr(suite_module, "benchmark_batch_candidate", safe_candidate)
+    config = SuiteConfig(
+        root=workspace["root"] / "suite_explicit_preflight",
+        prepared_dir=workspace["prepared"],
+        specs=("tiny",),
+        batch_size=8,
+        model_compile="reduce-overhead",
+        amp="auto",
+        device="cpu",
+        score_weight=81.0,
+        grad_clip=0.75,
+    )
+    paths = build_suite_paths(config)
+    ensure_suite_dirs(paths)
+    selected, results = choose_batch_size(config, paths)
+
+    assert selected == 8 and results
+    assert seen[0]["batch_size"] == 8
+    assert seen[0]["loss_weights"].score == 81.0
+    assert seen[0]["grad_clip"] == 0.75
+    assert seen[0]["warmup_steps"] == config.warmup_steps
+
+
+def test_explicit_suite_batch_rejects_failed_preflight(
+    workspace: dict[str, Path], spec_patch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sakigo.train.suite as suite_module
+    from sakigo.train.suite import (
+        SuiteConfig,
+        build_suite_paths,
+        choose_batch_size,
+        ensure_suite_dirs,
+    )
+
+    def unsafe_candidate(spec, dataset, batch_size, device, **kwargs):
+        return {
+            "batch_size": batch_size,
+            "samples_per_second": None,
+            "peak_allocated_bytes": 10,
+            "peak_reserved_bytes": 20,
+            "reason": "parity_failed:gradients",
+            "safety": {"ok": False},
+        }
+
+    monkeypatch.setattr(suite_module, "benchmark_batch_candidate", unsafe_candidate)
+    config = SuiteConfig(
+        root=workspace["root"] / "suite_explicit_reject",
+        prepared_dir=workspace["prepared"],
+        specs=("tiny",),
+        batch_size=8,
+        model_compile="reduce-overhead",
+        device="cpu",
+    )
+    paths = build_suite_paths(config)
+    ensure_suite_dirs(paths)
+    with pytest.raises(RuntimeError, match="mandatory safety preflight"):
+        choose_batch_size(config, paths)

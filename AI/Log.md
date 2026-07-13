@@ -2,6 +2,23 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-14 - Per-board-size and per-ruleset validation curves
+
+- Reserved the validation budget evenly across the six active board-size/ruleset book cohorts while preserving global population-weighted training sampling from the remaining nodes.
+- Added prepared-manifest cohort counts and validation-only homogeneous batching with mandatory coverage of every cohort; training sampling remains unstratified by ruleset.
+- Added `validation_metrics.csv` and TensorBoard `val_groups/` loss curves for each cohort, including total and per-head loss, while retaining aggregate metrics for compatibility.
+- Focused CPU validation passed; the existing generation process and its run directory were not touched.
+
+## 2026-07-13 - Multi-book worktree reconciled and hardened
+
+- Corrected current READMEs, design notes, contracts, architecture/pipeline viewers, and durable AI context to describe direct six-book targets, mixed board sizes, prepared format v3, checkpoint schema 7, the no-ownership four-head model, exact sampler resume, and the `L*n=1024` sweep. Historical audits and removed-path references are now labeled rather than presented as live instructions.
+- Hardened resume and ingestion after a deeper audit: checkpoints now bind all trajectory properties and prepared-data identity; sampler state binds its configuration and cannot duplicate an index inside a wrapping full batch; shard/preparation inputs use SHA-256 identities and reject duplicate, overlapping, or mid-prepare-changing sources. Corrected the promise from bit-identical weights to exact batch/control state because backend kernels are not necessarily bit-reproducible. Lazy compile failures and all training failures now fail closed with persisted status; the explicit SDPA graph boundary and old-checkpoint incompatibility remain intentional.
+- Reconciled durable context and decisions with the active six-book 7x7/8x8/9x9 dataset, checkpoint schema 7, and the `L*n=1024` depth/width sweep (`32x32`, `64x16`, `128x8`).
+- Made control-state-exact resume fail closed when optimizer state, trajectory properties, prepared-data identity, or checkpoint step are incompatible; direct training configs reject invalid bounds, modes, non-finite values, and all-zero loss weights before creating a run.
+- Bound multi-book shard reuse to a deterministic sample identity and exact offset, made preparation and the automatic suite consume only manifest-listed shards, and taught the launcher to select the multi-book or legacy single-book sampler from the index report.
+- Extended canonical book openings to 7x7/8x8/9x9 and made `opening_plies` apply consistently; strict record identity fields no longer coerce booleans, floats, or strings.
+- Changed benchmark model-config loading to `weights_only=True`. Full CPU pytest passed with the opt-in CUDA compile integration gate skipped; the live three-worker multi-book index process was left running and untouched.
+
 ## 2026-07-12 - Board stem moved before the D4 lift
 
 - Replaced `lift -> regular 6 -> 16 -> 128` with scalar pointwise `6 -> 16 -> 128 -> lift`; the regular trunk and register path are unchanged.
@@ -98,7 +115,7 @@ Dated, newest first. What changed, what is next. One entry per working session.
 
 ## 2026-07-06 - P6 cutover executed (legacy stack deleted)
 
-- Owner approved ("lets cut!"). Deleted `Training/*.py` (12 modules) and `Model/` entirely; kept `Training/data` + `Training/runs`. Legacy checkpoints remain loadable — [test_legacy_checkpoints.py](../tests/test_legacy_checkpoints.py) pins the load+remap path.
+- Owner approved ("lets cut!"). Deleted `Training/*.py` (12 modules) and `Model/` entirely; kept `Training/data` + `Training/runs`. The then-current `tests/test_legacy_checkpoints.py` pinned the load+remap path; that transitional test has since been removed.
 - Parity tests that needed the legacy oracle were converted to self-contained invariant tests (equivariance, spec sync, hash-split/round-trip/collate contract, engine binding invariants, generator perspective-flip/schema/quota/shard tests). 35/35 pytest green post-cutover; pyproject testpaths now just `tests/`.
 - Salvaged before deletion: the WDDM-aware batch-size sweep → [sakigo/train/benchmark.py](../sakigo/train/benchmark.py) (`python -m sakigo.train.benchmark`). adapters.py died with Model/ per the deferral decision (reimplement over the Rust encoder when Phase 2 is reconciled with D10).
 - Updated: root README (layout + commands), AI/Context.md (phase, implementation map, boundary now names `sakigo/`), RebuildPlan status → complete.
@@ -161,15 +178,15 @@ Dated, newest first. What changed, what is next. One entry per working session.
 
 ## 2026-07-05 - Switched training data to DataLoader-backed zstd shards
 
-- Added zstd JSONL support in [data.py](../Training/data.py): `.jsonl.zst` readers/writers, shard-directory/glob expansion, and format labels. Plain `.jsonl` remains readable but is treated as deprecated for training data.
-- Reworked [train.py](../Training/train.py) so the default path is bounded streaming (`--stream-buffer-mb 1024`) through PyTorch `IterableDataset` + `DataLoader`; `--stream-buffer-mb 0` keeps the deprecated eager path. The training loop no longer uses the custom background prefetcher.
-- Updated [generate_katago_phase1.py](../Training/generate_katago_phase1.py) to write numbered `.jsonl.zst` shards by default (`--samples-per-file 65536`, `--zstd-level 3`), with a legacy single-file escape hatch via `--samples-per-file 0`.
-- Updated [run_phase1_suite.py](../Training/run_phase1_suite.py) to accept directories, globs, or multiple shard paths. Verification: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest Training/test_training_orchestrator.py` passed (`27 passed`).
+- Added zstd JSONL support in the since-removed `Training/data.py`: `.jsonl.zst` readers/writers, shard-directory/glob expansion, and format labels. Plain `.jsonl` remained readable but was treated as deprecated for training data.
+- Reworked the since-removed `Training/train.py` so the default path was bounded streaming (`--stream-buffer-mb 1024`) through PyTorch `IterableDataset` + `DataLoader`; `--stream-buffer-mb 0` kept the deprecated eager path. The training loop no longer used the custom background prefetcher.
+- Updated the since-removed `Training/generate_katago_phase1.py` to write numbered `.jsonl.zst` shards by default (`--samples-per-file 65536`, `--zstd-level 3`), with a legacy single-file escape hatch via `--samples-per-file 0`.
+- Updated the since-removed `Training/run_phase1_suite.py` to accept directories, globs, or multiple shard paths. Verification at the time: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest Training/test_training_orchestrator.py` passed (`27 passed`).
 
 ## 2026-07-05 - Added Linux KataGo engine support
 
 - Downloaded and checksum-verified the official KataGo v1.16.5 OpenCL Linux x64 archive into ignored local artifacts, then extracted it under `Distillation/engine/katago-v1.16.5-opencl-linux-x64/`.
-- Updated [generate_katago_phase1.py](../Training/generate_katago_phase1.py) so the default engine lookup prefers `katago.exe` on Windows and `katago` on Linux/macOS; added regression coverage in [test_training_orchestrator.py](../Training/test_training_orchestrator.py).
+- Updated the since-removed `Training/generate_katago_phase1.py` so the default engine lookup preferred `katago.exe` on Windows and `katago` on Linux/macOS; added regression coverage in the since-removed `Training/test_training_orchestrator.py`.
 - Added [Distillation/README.md](../Distillation/README.md) documenting the ignored artifact layout and Linux download command.
 
 ## 2026-07-05 - Denoted SAKI acronym
@@ -198,33 +215,33 @@ Dated, newest first. What changed, what is next. One entry per working session.
 ## 2026-07-03 - Fixed slow batch sweep (WDDM paging, not OOM)
 
 - Root cause: on Windows/WDDM, oversized batches do not raise `OutOfMemoryError` - the driver spills into shared system memory and runs at paging speed, so the sweep's OOM catch never fired and oversized candidates ground through all timed steps (model1 attention at batch 512 projects ~14 GiB on a 12 GiB card).
-- Fix in [run_phase1_suite.py](../Training/run_phase1_suite.py): peak-allocation check after the first step against a `--memory-fraction` budget (default 0.8 x dedicated VRAM), predictive skip of larger candidates by linear peak extrapolation, `--sweep-max-seconds` time cap on the timed loop, and early stop when throughput declines below 0.97 x best. Sweep lines now print peak GiB.
+- Fix in the since-removed `Training/run_phase1_suite.py`: peak-allocation check after the first step against a `--memory-fraction` budget (default 0.8 x dedicated VRAM), predictive skip of larger candidates by linear peak extrapolation, `--sweep-max-seconds` time cap on the timed loop, and early stop when throughput declines below 0.97 x best. Sweep lines now print peak GiB.
 - Verified on GPU across the full 128-1024 range: model1 picks 256 (7.1 GiB peak), 512 skipped by projection; control_params measures through 512 and skips 1024; whole sweep runs in seconds. Optional extra hardening: NVIDIA driver "Prefer No Sysmem Fallback" makes overflow fail fast globally.
 
 ## 2026-07-03 - Self-play eval harness (paired matches, Elo, SGF)
 
-- Added [selfplay_eval.py](../Training/selfplay_eval.py): paired color-reversed matches between two players (checkpoint raw-policy agents with legal masking + optional temperature, or a uniform-random baseline that passes only when forced). Reuses the Phase 1 generator's `Game` (Tromp-Taylor rules and exact board/rule encoding), shares one seeded uniform-random opening per pair, adjudicates at two passes or a ply cap via a new Tromp-Taylor area scorer, and reports winrate with Wilson 95% CI, Elo diff, and per-pair 2-0/1-1/0-2 counts. Outputs games.jsonl, summary.json, and one SGF per game.
+- Added the since-removed `Training/selfplay_eval.py`: paired color-reversed matches between two players (checkpoint raw-policy agents with legal masking + optional temperature, or a uniform-random baseline that passes only when forced). It reused the Phase 1 generator's `Game` (Tromp-Taylor rules and exact board/rule encoding), shared one seeded uniform-random opening per pair, adjudicated at two passes or a ply cap via a new Tromp-Taylor area scorer, and reported winrate with Wilson 95% CI, Elo diff, and per-pair 2-0/1-1/0-2 counts. Outputs were games.jsonl, summary.json, and one SGF per game.
 - Tests: scorer unit test (empty/one-color/contested boards) and a CPU random-vs-random match smoke (shared openings, outputs) - 8/8 passing. GPU smoke: 4-step suite_smoke model1 checkpoint vs random, 4 games completed (~31 plies/s), summary/SGF written.
 - Known gaps recorded in Issues: Python legality is the throughput bottleneck (~30 plies/s -> long full matches), ply-cap adjudication scores unfinished games by raw area (vibego used a neutral strong judge), players are raw-policy only until search exists.
 
 ## 2026-07-03 - Three-model suite runner, D4 augmentation, progress bar
 
-- Added [run_phase1_suite.py](../Training/run_phase1_suite.py): per-spec batch-size throughput sweep (OOM-aware, bf16 + fused AdamW, reuses `_train_batch`), then sequential subprocess training of `model1`, `model1_control_params`, `model1_control_compute` with an equal samples-seen budget (`--epochs` over the train split) and a final val-loss summary. Non-equivariant (ScalarSakiGoModel) specs automatically get `--augment-d4`.
-- Added `augment_record_d4` to [data.py](../Training/data.py) (random D4 symmetry per training sample: board planes, ownership, policy/budget board parts, legal mask; pass entry and global fields untouched) plus a unit test; `--augment-d4` wired into both trainer loading paths (train batches only, val untouched).
-- Added `--progress` to [train.py](../Training/train.py): in-place ASCII bar (step, samples/s, ETA, last loss), auto-on for TTY, clears around log lines.
+- Added the since-removed `Training/run_phase1_suite.py`: per-spec batch-size throughput sweep (OOM-aware, bf16 + fused AdamW, reuses `_train_batch`), then sequential subprocess training of `model1`, `model1_control_params`, `model1_control_compute` with an equal samples-seen budget (`--epochs` over the train split) and a final val-loss summary. Non-equivariant (ScalarSakiGoModel) specs automatically got `--augment-d4`.
+- Added `augment_record_d4` to the since-removed `Training/data.py` (random D4 symmetry per training sample: board planes, ownership, policy/budget board parts, legal mask; pass entry and global fields untouched) plus a unit test; `--augment-d4` was wired into both trainer loading paths (train batches only, val untouched).
+- Added `--progress` to the since-removed `Training/train.py`: in-place ASCII bar (step, samples/s, ETA, last loss), auto-on for TTY, clearing around log lines.
 - Verification: 6/6 pytest; full suite smoke on the 512-record subset ran all three specs (augment flag applied to the two controls) and printed plan + summary. Sweep datum at batch 128: model1 ~380 samples/s, control_params ~1,080, control_compute ~410 — consistent with the compute-matched design intent.
 
 ## 2026-07-03 - Training-throughput optimizations landed
 
 - Data path: `TrainingRecord` is now numpy-backed; JSONL decoding moved to buffer-insert with vectorized validation (no per-batch `json.loads`), buffer budget counts decoded array bytes, and `collate` numpy-stacks with pinned memory + non-blocking H2D. Added `BatchPrefetcher` (default `--prefetch-batches 2`) assembling CPU batches on a background thread; the streaming buffer got an internal lock and eval sampling no longer advances the ingest stream.
-- GPU path: bf16 autocast by default on CUDA (`--amp off` to disable), fused AdamW, branchless masked losses (removed 5 per-step `.item()` syncs), and opt-in `--cuda-graphs` (new [graph_step.py](../Training/graph_step.py)): 3 counted eager warmup steps on a side stream, then full-step capture (zero/forward/losses/backward/clip/step) with capturable AdamW. Skipped `torch.compile` — Inductor needs Triton, unavailable on native Windows.
+- GPU path: bf16 autocast by default on CUDA (`--amp off` to disable), fused AdamW, branchless masked losses (removed 5 per-step `.item()` syncs), and opt-in `--cuda-graphs` (the since-removed `Training/graph_step.py`): 3 counted eager warmup steps on a side stream, then full-step capture (zero/forward/losses/backward/clip/step) with capturable AdamW. Skipped `torch.compile` — Inductor needs Triton, unavailable on native Windows at that time.
 - Verification: 5/5 pytest (needs `--basetemp` on this machine; system temp denies access). GPU smokes on real Phase 1 records: graphs trajectory matches eager to ~3 decimals at same seed. 300 steps @ batch 128: baseline 219s -> bf16+prefetch 126s -> +graphs 122s (~1.8x; batch-128 training is compute-bound, so graphs add little here — their payoff is batch-1 search latency later).
 - Caveats: exact resume determinism is relaxed under prefetch (buffer contents timing-dependent; stream position was already not checkpointed). Startup full-file scan remains; binary shards still the right long-run fix.
 
 ## 2026-07-03 - Added streaming JSONL training buffer
 
-- Added `--stream-buffer-mb` to [train.py](../Training/train.py). `0` keeps the old eager loader; positive values use a rolling raw-line JSONL buffer capped by the requested MiB budget, with deterministic train/validation splitting by `(seed, board_size, position_key)`.
-- Added stream metadata scanning and `StreamingJsonlBuffer` in [data.py](../Training/data.py), plus a streaming train smoke in [test_training_orchestrator.py](../Training/test_training_orchestrator.py).
+- Added `--stream-buffer-mb` to the since-removed `Training/train.py`. `0` kept the old eager loader; positive values used a rolling raw-line JSONL buffer capped by the requested MiB budget, with deterministic train/validation splitting by `(seed, board_size, position_key)`.
+- Added stream metadata scanning and `StreamingJsonlBuffer` in the since-removed `Training/data.py`, plus a streaming train smoke in the since-removed `Training/test_training_orchestrator.py`.
 - Verification: `uv --cache-dir .uv-cache run --frozen pytest Training/test_training_orchestrator.py` passed (`5 passed`). A generated-slice streaming smoke passed. A full-file 1-step smoke on `Training/data/katago_phase1_20260703_172838/samples.jsonl` passed with `--stream-buffer-mb 64`; config recorded 262,144 rows, 236,411 train records, 25,733 validation records, and a 64 MiB buffer holding 2,886 raw records.
 
 ## 2026-07-03 - Checked Phase 1 sample training readiness
@@ -234,7 +251,7 @@ Dated, newest first. What changed, what is next. One entry per working session.
 
 ## 2026-07-03 - Started 2^18 KataGo Phase 1 generation run
 
-- Added [generate_katago_phase1.py](../Training/generate_katago_phase1.py), a schema-v1 JSONL generator that keeps concurrent KataGo analysis games/positions in flight, writes SAKIGo board/rule tensors, maps raw KataGo policy to budget, maps top-1 to policy, and converts WDL/score/ownership from BLACK to current-player perspective.
+- Added the since-removed `Training/generate_katago_phase1.py`, a schema-v1 JSONL generator that kept concurrent KataGo analysis games/positions in flight, wrote SAKIGo board/rule tensors, mapped raw KataGo policy to budget, mapped top-1 to policy, and converted WDL/score/ownership from BLACK to current-player perspective.
 - Smoke-tested 64 samples and loaded them through `Training.data.load_records`: board planes/rules/ownership/legal-mask lengths and WDL/policy/budget normalization checked out.
 - Launched run `katago_phase1_20260703_172838` for 262,144 samples using `nnMaxBatchSize=20`, `numAnalysisThreads=40`, and 40 concurrent games. Initial live checkpoint: 8,192 / 262,144 samples, about 230 samples/s, ETA about 18 minutes. Output: `Training/data/katago_phase1_20260703_172838/samples.jsonl`; status: `Training/data/katago_phase1_20260703_172838/status.json`; logs: `Training/runs/katago_phase1_20260703_172838/`.
 - Completion check: status reached `complete`, process exited cleanly, output size is about 5.7 GB, and a streaming pass counted exactly 262,144 JSONL rows. Spot-validation through `record_from_json` at lines 1, 2, 3, 65,536, 131,072, 196,608, and 262,144 confirmed board/rule/target lengths and WDL/policy/budget sums.

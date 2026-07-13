@@ -11,6 +11,22 @@ from torch.nn import functional as F
 from equivariant_attention.groups import FiniteGroupSpec, resolve_group
 
 
+@torch.compiler.disable
+def _safe_scaled_dot_product_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+) -> torch.Tensor:
+    """Keep SDPA on PyTorch's proven eager path inside a compiled model.
+
+    Inductor's compiled BF16 GQA backward can leave this model numerically
+    corrupted after an otherwise-finite optimizer step.  The projections and
+    surrounding trunk remain compiled; only the fused attention primitive is
+    an explicit graph boundary.
+    """
+    return F.scaled_dot_product_attention(query, key, value, enable_gqa=True)
+
+
 class RegularLift(nn.Module):
     """Lift scalar spatial features [B,C,H,W] to regular features [B,C,G,H,W]."""
 
@@ -348,7 +364,7 @@ class RegularCrossAttention(nn.Module):
         q_flat = q.reshape(batch * group, self.q_heads, query_tokens, head_dim)
         k_flat = k.reshape(batch * group, self.kv_heads, key_tokens, head_dim)
         v_flat = v.reshape(batch * group, self.kv_heads, key_tokens, head_dim)
-        attended = F.scaled_dot_product_attention(q_flat, k_flat, v_flat, enable_gqa=True)
+        attended = _safe_scaled_dot_product_attention(q_flat, k_flat, v_flat)
         attended = attended.reshape(batch, group, self.q_heads, query_tokens, head_dim)
         if self.query_is_spatial:
             height = query.shape[-2]

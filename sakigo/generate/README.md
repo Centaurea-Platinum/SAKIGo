@@ -1,36 +1,50 @@
-# Book-only 9×9 distillation data
+# Mixed small-board book distillation
 
-The active dataset is sampled directly from the 2026-02-26 Tromp–Taylor,
-komi-7 KataGo book. It performs no teacher inference, generates no
-continuations, and has no ownership target.
+The active pipeline samples directly from six KataGo books:
 
-Default sizes are exactly:
+- 9×9 Tromp–Taylor komi 7 and Japanese komi 6;
+- 8×8 Tromp–Taylor komi 10 and Japanese komi 9;
+- 7×7 Tromp–Taylor komi 9 and Japanese komi 8.
 
-- training: `2^20` = 1,048,576 records;
-- validation: `2^12` = 4,096 records.
-
-Nodes are selected uniformly by a stable hash over validated canonical book
-positions. Pages containing an `other` row remain eligible; only the `other`
-row is discarded when concrete move targets are constructed.
-
-```powershell
-python -m sakigo.generate.book_distillation all --run-dir runs/tt7-book-only
-```
-
-The stages may also be resumed separately:
+It performs no teacher inference, generates no continuations, and has no
+ownership target. Default global sizes remain `2^20` training records and
+`2^12` validation records; these totals are not multiplied by the number of
+books. Validation is divided as evenly as capacity allows across all six
+board-size/ruleset cohorts, while training is sampled globally from the
+remaining eligible population.
 
 ```powershell
-python -m sakigo.generate.book_distillation artifacts --run-dir runs/tt7-book-only
-python -m sakigo.generate.book_distillation index --run-dir runs/tt7-book-only
-python -m sakigo.generate.book_distillation sample --run-dir runs/tt7-book-only
+python -m sakigo.generate.multi_book_distillation all `
+  --run-dir runs/smallboard-multibook --workers 3
 ```
 
-The archive is streamed directly into SQLite rather than extracted as roughly
-a million tiny HTML files. The index replays canonical parent histories with
-the local rules engine and rejects board, player, orientation, or concrete-move
-legality disagreements. The exact sampled node IDs are frozen in SQLite before
-records are emitted. Completed zstd shards are atomic and skipped on resume.
+The resumable stages are `artifacts`, `index`, `sample`, and `prepare`.
+Indexing, validation, and JSONL emission process separate books concurrently.
+Archives are streamed into one SQLite index per book rather than extracted as
+millions of tiny files.
 
-Targets are book-derived: equal mass over concrete moves tied after score
-rounding for policy, normalized concrete `AVisits` for budget, rounded `ssM`
-for score, and `wl` for W/L (with rounded zero score mapped to draw).
+Completed shards carry byte counts and SHA-256 digests that are verified on
+reuse and ingestion. Tensor preparation rejects duplicate or overlapping
+train/validation sources and rechecks content identity around both decode
+passes before atomically publishing a prepared generation.
+
+Training has no fixed board-size, book, or ruleset quota. A seeded global
+without-replacement draw selects from the remaining union of eligible nodes in
+proportion to each book's population. Training then creates shape-compatible
+batches from shuffled records of one board size. Rulesets are not stratified
+inside a training batch, and shuffled board-size batch tickets occur in
+proportion to the available records; consecutive batches may naturally have
+the same size. Validation batches are homogeneous by both board size and
+ruleset so their loss curves remain separately comparable.
+
+Pages containing an `other` row remain eligible. Only the `other` row is
+discarded when constructing concrete targets. Policy assigns equal mass to
+concrete moves tied after score rounding, budget normalizes concrete `AVisits`,
+score uses rounded `ssM`, and W/L uses `wl` with rounded zero score mapped to
+draw. Canonical book nodes deduplicate symmetries and transposed move orders;
+the frozen sample table additionally prevents a node from appearing twice or
+crossing between training and validation. Positions with different board sizes
+or rule features remain distinct because they are different model inputs.
+
+The legacy single-book command remains available as
+`sakigo.generate.book_distillation` for reproducing the original 9×9 TT7 run.

@@ -1,12 +1,14 @@
 """Data gates: prepared tensor shards preserve record data exactly, the
 blake2b split is applied per position, and batches are single-board-size
-with balanced rulesets and the contract layout.
+with randomly mixed rulesets and the contract layout.
 """
 
 from __future__ import annotations
 
 import copy
+from collections import Counter
 import json
+import os
 import random
 from pathlib import Path
 
@@ -15,8 +17,9 @@ import pytest
 import torch
 
 from sakigo.data import (
+    GroupedValidationBatchSampler,
     PreparedDataset,
-    RulesetBalancedBatchSampler,
+    SizeGroupedBatchSampler,
     collate_prepared,
     iter_records,
     make_dataloader,
@@ -81,16 +84,52 @@ def test_split_membership_matches_hash_split(prepared: tuple[Path, Path]) -> Non
     jsonl_path, out_dir = prepared
     manifest = load_manifest(out_dir)
     expected_counts: dict[tuple[str, int], int] = {}
+    expected_validation: Counter[tuple[int, str]] = Counter()
     for record in iter_records([jsonl_path]):
         split = split_for_record(record, VAL_FRACTION, SEED)
         expected_counts[(split, record.board_size)] = (
             expected_counts.get((split, record.board_size), 0) + 1
         )
+        if split == "val":
+            expected_validation[(record.board_size, record.ruleset_key)] += 1
     actual_counts = {
         (group["split"], group["board_size"]): group["count"] for group in manifest["groups"]
     }
     assert actual_counts == expected_counts
     assert any(split == "val" for split, _ in actual_counts)
+    actual_validation = {
+        (group["board_size"], group["ruleset_key"]): group["count"]
+        for group in manifest["validation_groups"]
+    }
+    assert actual_validation == expected_validation
+
+
+def test_validation_batches_cover_each_size_and_ruleset_cohort(
+    prepared: tuple[Path, Path],
+) -> None:
+    _, out_dir = prepared
+    dataset = PreparedDataset(out_dir, "val")
+    sampler = GroupedValidationBatchSampler(
+        dataset, batch_size=4, seed=17, fixed=True
+    )
+    observed: set[tuple[int, int]] = set()
+    for batch in sampler:
+        cohorts = {
+            (dataset.board_size_of(index), dataset.ruleset_code_of(index))
+            for index in batch
+        }
+        assert len(cohorts) == 1
+        observed.update(cohorts)
+    expected = {
+        (cohort.board_size, cohort.ruleset_code)
+        for cohort in dataset.validation_cohorts()
+    }
+    assert observed == expected
+
+    with pytest.raises(ValueError, match="cannot cover all"):
+        GroupedValidationBatchSampler(
+            dataset, batch_size=4, seed=17, length=len(expected) - 1
+        )
 
 
 def test_prepared_arrays_round_trip(prepared: tuple[Path, Path]) -> None:
@@ -128,6 +167,41 @@ def test_prepare_is_cached(prepared: tuple[Path, Path]) -> None:
     assert manifest_after == manifest_before
 
 
+def test_prepare_cache_normalizes_relative_source_paths(
+    prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jsonl_path, out_dir = prepared
+    manifest_before = load_manifest(out_dir)
+    monkeypatch.chdir(jsonl_path.parent)
+    manifest_after = prepare_tensor_shards(
+        [Path(jsonl_path.name)], out_dir, seed=SEED, val_fraction=VAL_FRACTION
+    )
+    assert manifest_after == manifest_before
+
+
+def test_prepare_cache_detects_same_size_same_mtime_content_change(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "records.jsonl"
+    raw = _make_raw_record(random.Random(43), 5, "tromp-taylor", 0)
+    source.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+    prepared_dir = tmp_path / "prepared-digest"
+    before = prepare_tensor_shards(
+        [source], prepared_dir, seed=3, val_fraction=0.0
+    )
+    stat = source.stat()
+    raw["position_key"] = "z" * len(raw["position_key"])
+    source.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+    assert source.stat().st_size == stat.st_size
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    after = prepare_tensor_shards(
+        [source], prepared_dir, seed=3, val_fraction=0.0
+    )
+    assert after["generation"] != before["generation"]
+    assert after["sources"][0]["sha256"] != before["sources"][0]["sha256"]
+
+
 def test_prepare_preserves_explicit_validation_sources(tmp_path: Path) -> None:
     train_path = tmp_path / "train.jsonl"
     validation_path = tmp_path / "validation.jsonl"
@@ -148,6 +222,23 @@ def test_prepare_preserves_explicit_validation_sources(tmp_path: Path) -> None:
     counts = {group["split"]: group["count"] for group in manifest["groups"]}
     assert counts == {"train": 5, "val": 3}
     assert manifest["split_mode"] == "explicit"
+
+
+def test_prepare_rejects_duplicate_and_overlapping_sources(tmp_path: Path) -> None:
+    source = tmp_path / "samples.jsonl"
+    source.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate training"):
+        prepare_tensor_shards(
+            [source, source], tmp_path / "prepared-duplicate", seed=1, val_fraction=0.1
+        )
+    with pytest.raises(ValueError, match="overlap"):
+        prepare_tensor_shards(
+            [source],
+            tmp_path / "prepared-overlap",
+            validation_data=[source],
+            seed=1,
+            val_fraction=0.0,
+        )
 
 
 def test_force_prepare_atomically_switches_generation(prepared: tuple[Path, Path]) -> None:
@@ -195,6 +286,24 @@ def test_record_contract_requires_version_and_ruleset(field: str) -> None:
         record_from_json(raw)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("schema_version", 1.5, "schema_version must be an integer"),
+        ("board_size", True, "board_size must be an integer"),
+        ("ply", "3", "ply must be an integer"),
+        ("position_key", 17, "position_key must be a string"),
+    ],
+)
+def test_record_contract_rejects_coerced_identity_fields(
+    field: str, value: object, message: str
+) -> None:
+    raw = _make_raw_record(random.Random(31), 5, "tromp-taylor", 0)
+    raw[field] = value
+    with pytest.raises(ValueError, match=message):
+        record_from_json(raw)
+
+
 def test_canonical_split_ignores_move_path_identity() -> None:
     raw = _make_raw_record(random.Random(17), 5, "tromp-taylor", 0)
     transposed = copy.deepcopy(raw)
@@ -206,38 +315,96 @@ def test_canonical_split_ignores_move_path_identity() -> None:
     )
 
 
-def test_batches_are_single_size_and_ruleset_balanced(prepared: tuple[Path, Path]) -> None:
+def test_batches_are_single_size_with_unstratified_rulesets(
+    prepared: tuple[Path, Path],
+) -> None:
     _, out_dir = prepared
     dataset = PreparedDataset(out_dir, "train")
-    sampler = RulesetBalancedBatchSampler(dataset, batch_size=9, seed=5, length=40)
+    sampler = SizeGroupedBatchSampler(dataset, batch_size=9, seed=5, length=40)
     ruleset_count = len({dataset.ruleset_code_of(i) for i in range(len(dataset))})
     assert ruleset_count == 3
     for batch_indices in sampler:
         assert len(batch_indices) == 9
         sizes = {dataset.board_size_of(index) for index in batch_indices}
         assert len(sizes) == 1
-        code_counts: dict[int, int] = {}
-        for index in batch_indices:
-            code = dataset.ruleset_code_of(index)
-            code_counts[code] = code_counts.get(code, 0) + 1
-        assert max(code_counts.values()) - min(code_counts.values()) <= 1
+    # Sampling is deterministic for a seed, but neither rules nor consecutive
+    # board sizes are constrained. At least one naturally uneven rules batch
+    # distinguishes this from the removed fixed-ratio scheduler.
+    replay = SizeGroupedBatchSampler(dataset, batch_size=9, seed=5, length=40)
+    batches = list(replay)
+    assert any(
+        len({dataset.ruleset_code_of(index) for index in batch}) < ruleset_count
+        for batch in batches
+    )
+    sizes = [dataset.board_size_of(batch[0]) for batch in batches]
+    assert any(left == right for left, right in zip(sizes, sizes[1:]))
+
+
+def test_default_size_schedule_preserves_uneven_group_frequency(
+    prepared: tuple[Path, Path],
+) -> None:
+    _, out_dir = prepared
+    dataset = PreparedDataset(out_dir, "train")
+    batch_size = 9
+    expected = {
+        group.board_size: (group.count + batch_size - 1) // batch_size
+        for group in dataset.groups
+    }
+    sampler = SizeGroupedBatchSampler(
+        dataset,
+        batch_size=batch_size,
+        seed=41,
+        length=sum(expected.values()),
+    )
+    observed = Counter(dataset.board_size_of(batch[0]) for batch in sampler)
+    assert observed == expected
 
 
 def test_sampler_state_round_trip(prepared: tuple[Path, Path]) -> None:
     _, out_dir = prepared
     dataset = PreparedDataset(out_dir, "train")
-    first = RulesetBalancedBatchSampler(dataset, batch_size=9, seed=23)
+    first = SizeGroupedBatchSampler(dataset, batch_size=9, seed=23)
     iterator = iter(first)
     for _ in range(7):
         next(iterator)
     state = first.state_dict()
     expected = [next(iterator) for _ in range(8)]
 
-    resumed = RulesetBalancedBatchSampler(dataset, batch_size=9, seed=999)
+    resumed = SizeGroupedBatchSampler(dataset, batch_size=9, seed=999)
     resumed.load_state_dict(state)
     resumed_iterator = iter(resumed)
     actual = [next(resumed_iterator) for _ in range(8)]
     assert actual == expected
+
+
+def test_sampler_never_duplicates_a_record_when_a_pool_wraps(
+    prepared: tuple[Path, Path],
+) -> None:
+    _, out_dir = prepared
+    dataset = PreparedDataset(out_dir, "train")
+    minimum_pool = min(
+        sum(group.count for group in dataset.groups if group.board_size == size)
+        for size in dataset.board_sizes
+    )
+    batch_size = max(2, minimum_pool // 2 + 1)
+    sampler = SizeGroupedBatchSampler(
+        dataset,
+        batch_size=batch_size,
+        seed=71,
+        length=8,
+    )
+    for batch in sampler:
+        assert len(batch) == len(set(batch))
+
+
+def test_sampler_state_rejects_changed_batch_size(prepared: tuple[Path, Path]) -> None:
+    _, out_dir = prepared
+    dataset = PreparedDataset(out_dir, "train")
+    source = SizeGroupedBatchSampler(dataset, batch_size=9, seed=2)
+    state = source.state_dict()
+    changed = SizeGroupedBatchSampler(dataset, batch_size=8, seed=2)
+    with pytest.raises(ValueError, match="batch size"):
+        changed.load_state_dict(state)
 
 
 def test_augmentation_rng_state_round_trip(prepared: tuple[Path, Path]) -> None:
@@ -272,6 +439,8 @@ def test_collate_layout_and_values(prepared: tuple[Path, Path]) -> None:
     area = 25
     expected = {
         "board": ((4, 6, 5, 5), torch.float32),
+        "board_size": ((4,), torch.int64),
+        "ruleset_code": ((4,), torch.int32),
         "rules": ((4, 10), torch.float32),
         "ply": ((4,), torch.int64),
         "wdl_target": ((4, 4), torch.float32),
@@ -361,7 +530,7 @@ def _record_from_sample(sample: dict, size: int):
 def test_dataloader_with_workers(prepared: tuple[Path, Path]) -> None:
     _, out_dir = prepared
     dataset = PreparedDataset(out_dir, "train")
-    sampler = RulesetBalancedBatchSampler(dataset, batch_size=6, seed=7, length=4)
+    sampler = SizeGroupedBatchSampler(dataset, batch_size=6, seed=7, length=4)
     loader = make_dataloader(dataset, sampler, num_workers=2, pin_memory=False, seed=1)
     batches = list(loader)
     assert len(batches) == 4

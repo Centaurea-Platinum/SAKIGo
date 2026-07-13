@@ -17,7 +17,7 @@ not to perform ceremony.
       Check row-major board points, pass as the final action logit, rule feature
       length, komi/captures divided by board area, and score perspective.
 - [ ] Are side-to-move conversions correct? Check My/Opponent planes, WDL,
-      score sign, ownership, captured-stone difference, and per-ply perspective
+      score sign, any legacy ownership field, captured-stone difference, and per-ply perspective
       flips.
 - [ ] Are edge cases handled deliberately: empty board, full board, pass moves,
       ko/superko, suicide rules, non-square or small board assumptions, zero or
@@ -52,17 +52,18 @@ not to perform ceremony.
 - [ ] Is randomness seeded or documented where reproducibility matters?
 - [ ] Are resume/checkpoint semantics honest? If resume is valid but not
       bit-exact, say so.
-- [ ] Are memory and disk use bounded for large Phase 1 data, sharded data, and
-      streaming buffers?
+- [ ] Are memory and disk use bounded for large book indexes, sharded data, and
+      prepared tensor generations?
 
 ## 4. ML And Training Specifics
 
 - [ ] Are train/validation splits honest for the claim being made? Watch for
       transposed openings or duplicated positions leaking across splits.
 - [ ] Are targets normalized and masked consistently: WDL distribution, score,
-      ownership, policy, budget, legal mask, and pass entry?
-- [ ] Is the current distillation mapping preserved? Budget matches the smooth
-      KataGo policy distribution; policy matches the teacher's top-1 move.
+      policy, budget, legal mask, pass entry, and any legacy optional fields?
+- [ ] Is the current book mapping preserved? Budget is normalized over concrete
+      `AVisits`; policy is uniform over tied rounded-optimum concrete moves;
+      aggregate `other` affects WDL/score but is not an action target.
 - [ ] Is illegal-move masking applied only at the intended layer? Current design
       uses raw model logits during training; checkpoint-policy evaluation may
       apply the engine's legal mask.

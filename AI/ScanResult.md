@@ -1,5 +1,7 @@
 # Codebase Scan Result — 2026-07-06
 
+> Historical audit snapshot. Paths, test counts, and generator/model claims below describe the pre-cutover workspace at the time of the scan; use `AI/Context.md`, `sakigo/CONTRACTS.md`, and the current code for present-day ground truth.
+
 ## Addendum (same day): hash layering + rebuild-lens robustness pass
 
 **Hash semantics verified against KataGo source** (`boardhistory.cpp getKoHash`):
@@ -15,13 +17,13 @@ diff). `GameState::state_hash()` exposes it. 16 engine tests pass.
 
 **Rebuild-lens robustness findings (fixed):**
 - `save_checkpoint` wrote `.pt` files non-atomically → truncated checkpoint on
-  crash mid-write; now write-tmp-then-rename ([checkpoints.py](../Training/checkpoints.py)).
-- [train.py](../Training/train.py) carried two byte-identical ~90-line training
+  crash mid-write; now write-tmp-then-rename (`Training/checkpoints.py`, since removed).
+- `Training/train.py` carried two byte-identical ~90-line training
   loops (streaming + eager) — the top drift hazard in the file; extracted into
   one shared `_run_training_loop`.
 - KataGo engine process was **orphaned on any generator exception** outside the
   one handled analysis-error branch (shutdown sat after the `finally`); moved
-  close/wait/kill into the `finally` ([generate_katago_phase1.py](../Training/generate_katago_phase1.py)).
+  close/wait/kill into the `finally` (`Training/generate_katago_phase1.py`, since removed).
 - Dead `--prefetch-batches` no-op arg removed; scan-cache write made atomic.
 
 **Judged sound (checked, not changed):** generator `write_status` already
@@ -84,23 +86,23 @@ and dismissed against the source.
 
 - **Perspective/sign conversions** in the Phase 1 generator (BLACK-perspective
   KataGo → current player: WDL-4, score, ownership) and
-  [rulesets.py](../Training/rulesets.py) `rule_features` (komi negative for
+  `Training/rulesets.py` `rule_features` (komi negative for
   Black to move, capture diff = mine − opponent, both /area, clamped) — match
   the Rust encoder conventions.
-- **[rulesets.py](../Training/rulesets.py)** (newest module): KataGo↔SAKIGo
+- **`Training/rulesets.py`** (newest module at the time): KataGo↔SAKIGo
   rule projection refuses inexact mappings (scoring/tax, ko, suicide) loudly;
   preset rulesets consistent; ruleset keys stable.
-- **Ruleset-aware streaming sampler** ([data.py](../Training/data.py)):
+- **Ruleset-aware streaming sampler** (`Training/data.py`, since removed):
   balanced key order, without-replacement bags per (split, board, ruleset),
   offset-index path for uncompressed JSONL, eval sampling (`advance=False`)
   doesn't consume training bags or advance the ingest stream.
-- **Masked losses** ([losses.py](../Training/losses.py)): branchless,
+- **Masked losses** (`Training/losses.py`, since removed): branchless,
   `clamp_min(1.0)` normalization, no illegal-move masking at train time (per
   design).
-- **Streaming train loop** ([train.py](../Training/train.py)): eval collate
+- **Streaming train loop** (`Training/train.py`, since removed): eval collate
   unpinned+sync, `PinnedBatchKeeper` event fencing intact, val loader separate
   RNG, checkpoint/log cadence, RNG restore to CPU.
-- **Suite runner** ([run_phase1_suite.py](../Training/run_phase1_suite.py)):
+- **Suite runner** (`Training/run_phase1_suite.py`, since removed):
   WDDM peak-memory budget check, predictive skip, equal samples-seen budgets.
 - **Model** (subagent, thorough): D4 group tables, regular-rep transform
   convention, RoPE canonical frames, head shapes (N²+1 pass-last, WDL-4),

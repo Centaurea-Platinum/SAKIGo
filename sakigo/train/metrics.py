@@ -76,6 +76,45 @@ def append_metrics(path: Path, row: dict[str, float | int]) -> None:
         )
 
 
+def validation_group_fields() -> list[str]:
+    fields = [
+        "step",
+        "board_size",
+        "ruleset_name",
+        "komi",
+        "ruleset_key",
+        "records",
+        "batches",
+        "loss",
+    ]
+    for head in HEADS:
+        fields.extend((f"{head}_loss", f"{head}_target_count"))
+    return fields
+
+
+def write_validation_group_header(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        csv.writer(handle).writerow(validation_group_fields())
+
+
+def append_validation_groups(path: Path, rows: list[dict[str, object]]) -> None:
+    fields = validation_group_fields()
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        for row in rows:
+            formatted: dict[str, object] = {}
+            for field in fields:
+                value = row.get(field, "")
+                if isinstance(value, float) and (
+                    field.endswith("_count") or field in {"records", "batches"}
+                ):
+                    formatted[field] = "" if math.isnan(value) else str(int(round(value)))
+                else:
+                    formatted[field] = format_metric(value) if isinstance(value, float) else value
+            writer.writerow(formatted)
+
+
 def _nan() -> float:
     return float("nan")
 
@@ -89,6 +128,7 @@ class MetricAccumulator:
 
     def reset(self) -> None:
         self.steps = 0
+        self.records = 0
         self._device: torch.device | None = None
         self._sums: dict[str, torch.Tensor] = {}
         self.confusion = torch.zeros((len(WDL_LABELS), len(WDL_LABELS)), dtype=torch.float64)
@@ -108,6 +148,7 @@ class MetricAccumulator:
         total_loss: torch.Tensor,
     ) -> None:
         self.steps += 1
+        self.records += int(batch["board"].shape[0])
         if self._device is None:
             self._device = total_loss.device
             self.confusion = self.confusion.to(self._device)
@@ -167,13 +208,15 @@ class MetricAccumulator:
 
     def averages(self) -> dict[str, float]:
         sums = {key: float(value.cpu()) for key, value in self._sums.items()}
-        out: dict[str, float] = {
-            "loss": sums.get("loss", _nan()) / self.steps if self.steps else _nan(),
-        }
+        out: dict[str, float] = {"records": float(self.records)}
+        total = 0.0
         for head in HEADS:
             count = sums.get(f"{head}_count", 0.0)
             out[f"{head}_loss"] = sums.get(f"{head}_loss", 0.0) / count if count else _nan()
             out[f"{head}_target_count"] = count
+            if count:
+                total += self.loss_weights[head] * out[f"{head}_loss"]
+        out["loss"] = total if self.steps else _nan()
         wdl_total = sums.get("wdl_total", 0.0)
         out["wdl_acc"] = sums.get("wdl_correct", 0.0) / wdl_total if wdl_total else _nan()
         for head in ACTION_HEADS:
