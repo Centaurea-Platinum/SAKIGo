@@ -4,6 +4,7 @@ Dated, newest first. What changed, what is next. One entry per working session.
 
 ## 2026-07-14 - Per-board-size and per-ruleset validation curves
 
+- Scheduled a guarded 23,000,000-position one-epoch suite for narrow-deep, balanced, and wide-shallow behind the active six-book index. The launcher will refresh the old allocation after indexing, reserve 6,144 validation records (`2^10` per active board-size/ruleset cohort), then sample, prepare, safety-preflight, and train sequentially; an hourly task monitor reports state changes without disturbing the live index.
 - Reserved the validation budget evenly across the six active board-size/ruleset book cohorts while preserving global population-weighted training sampling from the remaining nodes.
 - Added prepared-manifest cohort counts and validation-only homogeneous batching with mandatory coverage of every cohort; training sampling remains unstratified by ruleset.
 - Added `validation_metrics.csv` and TensorBoard `val_groups/` loss curves for each cohort, including total and per-head loss, while retaining aggregate metrics for compatibility.

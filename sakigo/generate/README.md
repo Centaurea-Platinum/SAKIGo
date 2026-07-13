@@ -23,6 +23,12 @@ Indexing, validation, and JSONL emission process separate books concurrently.
 Archives are streamed into one SQLite index per book rather than extracted as
 millions of tiny files.
 
+The automatic suite can wait behind an active index, refresh a stale allocation
+to requested totals, emit and prepare the dataset, run mandatory batch-safety
+preflight, and train all three packaged models sequentially. For example,
+`--train-samples 23000000 --validation-samples 6144` reserves exactly `2^10`
+validation records for each of the six active board-size/ruleset cohorts.
+
 Completed shards carry byte counts and SHA-256 digests that are verified on
 reuse and ingestion. Tensor preparation rejects duplicate or overlapping
 train/validation sources and rechecks content identity around both decode

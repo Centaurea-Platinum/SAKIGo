@@ -36,7 +36,12 @@ import sakigo.generate.multi_book_distillation as multi_book_module
 from sakigo.generate.record_builder import build_book_training_record
 from sakigo.generate.targets import ConcreteBookMove, book_budget, book_policy
 from sakigo.rulesets import BLACK, WHITE, ruleset_from_name, ruleset_from_overrides
-from sakigo.train.auto_book_suite import _manifest_shards, _sample_command
+from sakigo.train.auto_book_suite import (
+    _index_allocation_matches,
+    _index_command,
+    _manifest_shards,
+    _sample_command,
+)
 
 
 def _page(
@@ -244,6 +249,20 @@ def test_default_books_receive_nearly_equal_validation_cohorts() -> None:
     assert sum(value["train"] for value in allocation.values()) == 120
 
 
+def test_large_run_reserves_1024_validation_positions_per_cohort() -> None:
+    allocation = allocate_global_random_sample(
+        train_total=120,
+        validation_total=6 * (1 << 10),
+        capacities={spec.book_id: 5_000_000 for spec in BOOK_SPECS},
+        specs=BOOK_SPECS,
+        seed=20260713,
+    )
+    assert {
+        spec.book_id: allocation[spec.book_id]["validation"] for spec in BOOK_SPECS
+    } == {spec.book_id: 1 << 10 for spec in BOOK_SPECS}
+    assert sum(value["train"] for value in allocation.values()) == 120
+
+
 def test_per_book_orchestration_actually_overlaps_workers() -> None:
     specs = BOOK_SPECS[:2]
     barrier = threading.Barrier(2, timeout=2.0)
@@ -265,6 +284,35 @@ def test_auto_suite_selects_matching_generation_pipeline(tmp_path: Path) -> None
     command = _sample_command(tmp_path, report)
     assert "sakigo.generate.multi_book_distillation" in command
     assert command[-1] == "a,b"
+    refresh = _index_command(
+        tmp_path,
+        report,
+        train_samples=23_000_000,
+        validation_samples=6 * (1 << 10),
+        workers=3,
+    )
+    assert refresh[-6:] == [
+        "--train-samples",
+        "23000000",
+        "--validation-samples",
+        "6144",
+        "--workers",
+        "3",
+    ]
+    assert not _index_allocation_matches(
+        {"train_records": 23_000_000, "validation_records": 6144},
+        train_samples=23_000_000,
+        validation_samples=6144,
+    )
+    assert _index_allocation_matches(
+        {
+            "sample_allocation_version": multi_book_module.SAMPLE_ALLOCATION_VERSION,
+            "train_records": 23_000_000,
+            "validation_records": 6144,
+        },
+        train_samples=23_000_000,
+        validation_samples=6144,
+    )
 
     report.write_text(json.dumps({"database": "book_index.sqlite"}), encoding="utf-8")
     legacy = _sample_command(tmp_path, report)

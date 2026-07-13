@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sakigo.generate.multi_book_distillation import SAMPLE_ALLOCATION_VERSION
 from sakigo.train.suite import DEFAULT_SPECS, SuiteConfig, run_suite
 
 
@@ -22,7 +23,7 @@ def _write_status(path: Path, **values: object) -> None:
     temporary.replace(path)
 
 
-def _sample_command(generation_run: Path, index_report: Path) -> list[str]:
+def _book_ids_from_report(index_report: Path) -> list[str]:
     report = json.loads(index_report.read_text(encoding="utf-8"))
     books = report.get("books")
     if isinstance(books, list) and books:
@@ -33,6 +34,13 @@ def _sample_command(generation_run: Path, index_report: Path) -> list[str]:
         ]
         if len(book_ids) != len(books):
             raise ValueError("multi-book index report has malformed book metadata")
+        return book_ids
+    return []
+
+
+def _sample_command(generation_run: Path, index_report: Path) -> list[str]:
+    book_ids = _book_ids_from_report(index_report)
+    if book_ids:
         return [
             sys.executable,
             "-m",
@@ -51,6 +59,45 @@ def _sample_command(generation_run: Path, index_report: Path) -> list[str]:
         "--run-dir",
         str(generation_run),
     ]
+
+
+def _index_command(
+    generation_run: Path,
+    index_report: Path,
+    *,
+    train_samples: int,
+    validation_samples: int,
+    workers: int,
+) -> list[str]:
+    book_ids = _book_ids_from_report(index_report)
+    if not book_ids:
+        raise ValueError("full-dataset allocation refresh requires a multi-book report")
+    return [
+        sys.executable,
+        "-m",
+        "sakigo.generate.multi_book_distillation",
+        "index",
+        "--run-dir",
+        str(generation_run),
+        "--books",
+        ",".join(book_ids),
+        "--train-samples",
+        str(train_samples),
+        "--validation-samples",
+        str(validation_samples),
+        "--workers",
+        str(workers),
+    ]
+
+
+def _index_allocation_matches(
+    report: dict[str, object], *, train_samples: int, validation_samples: int
+) -> bool:
+    return (
+        report.get("sample_allocation_version") == SAMPLE_ALLOCATION_VERSION
+        and report.get("train_records") == train_samples
+        and report.get("validation_records") == validation_samples
+    )
 
 
 def _manifest_shards(
@@ -102,7 +149,14 @@ def run(
     poll_seconds: float = 30.0,
     prepared_dir: Path | None = None,
     model_compile: str = "reduce-overhead",
+    train_samples: int = 1 << 20,
+    validation_samples: int = 1 << 12,
+    index_workers: int = 3,
 ) -> None:
+    if train_samples <= 0 or validation_samples <= 0:
+        raise ValueError("training and validation sample counts must be positive")
+    if index_workers <= 0:
+        raise ValueError("index_workers must be positive")
     launcher_status = suite_run / "launcher_status.json"
     dataset_manifest = generation_run / "dataset_manifest.json"
     index_report = generation_run / "book_index_report.json"
@@ -114,6 +168,33 @@ def run(
     )
     while not dataset_manifest.exists():
         if index_report.exists():
+            report = json.loads(index_report.read_text(encoding="utf-8"))
+            if not _index_allocation_matches(
+                report,
+                train_samples=train_samples,
+                validation_samples=validation_samples,
+            ):
+                _write_status(
+                    launcher_status,
+                    state="refreshing_dataset_allocation",
+                    train_records=train_samples,
+                    validation_records=validation_samples,
+                )
+                try:
+                    subprocess.run(
+                        _index_command(
+                            generation_run,
+                            index_report,
+                            train_samples=train_samples,
+                            validation_samples=validation_samples,
+                            workers=index_workers,
+                        ),
+                        check=True,
+                    )
+                except Exception as error:
+                    _write_status(launcher_status, state="failed", error=str(error))
+                    raise
+                continue
             _write_status(
                 launcher_status,
                 state="generating_dataset_shards",
@@ -132,7 +213,7 @@ def run(
     manifest = json.loads(dataset_manifest.read_text(encoding="utf-8"))
     if manifest.get("state") != "complete":
         raise ValueError("dataset manifest is not complete")
-    expected = (1 << 20, 1 << 12)
+    expected = (train_samples, validation_samples)
     raw_counts = (manifest.get("train_records"), manifest.get("validation_records"))
     if any(type(value) is not int for value in raw_counts):
         raise ValueError("dataset manifest record totals must be integers")
@@ -140,11 +221,28 @@ def run(
     if actual != expected:
         raise ValueError(f"expected book dataset counts {expected}, found {actual}")
     require_identity = isinstance(manifest.get("allocation"), dict)
-    if require_identity and manifest.get("sample_allocation_version") != 2:
+    if (
+        require_identity
+        and manifest.get("sample_allocation_version") != SAMPLE_ALLOCATION_VERSION
+    ):
         raise ValueError(
             "multi-book dataset predates board-size/ruleset validation cohorts; "
             "rerun index and sample before training"
         )
+    allocation = manifest.get("allocation")
+    if require_identity and isinstance(allocation, dict):
+        validation_counts = []
+        for book_id, counts in allocation.items():
+            if not isinstance(book_id, str) or not isinstance(counts, dict):
+                raise ValueError("dataset manifest has malformed cohort allocation")
+            count = counts.get("validation")
+            if type(count) is not int or count <= 0:
+                raise ValueError(f"dataset manifest has no validation for cohort {book_id}")
+            validation_counts.append(count)
+        if not validation_counts or sum(validation_counts) != validation_samples:
+            raise ValueError("dataset manifest validation allocation has the wrong total")
+        if max(validation_counts) - min(validation_counts) > 1:
+            raise ValueError("dataset manifest validation cohorts are not balanced")
     train_sources = _manifest_shards(
         manifest, "train_shards", require_identity=require_identity
     )
@@ -208,6 +306,9 @@ def main() -> None:
         choices=("off", "default", "reduce-overhead"),
         default="reduce-overhead",
     )
+    parser.add_argument("--train-samples", type=int, default=1 << 20)
+    parser.add_argument("--validation-samples", type=int, default=1 << 12)
+    parser.add_argument("--index-workers", type=int, default=3)
     args = parser.parse_args()
     run(
         args.generation_run,
@@ -215,6 +316,9 @@ def main() -> None:
         args.poll_seconds,
         args.prepared_dir,
         args.compile,
+        args.train_samples,
+        args.validation_samples,
+        args.index_workers,
     )
 
 
