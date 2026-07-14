@@ -52,6 +52,38 @@ def test_parameter_parity_can_use_one_optimizer_update_tolerance() -> None:
     assert one_update["ok"]
 
 
+def test_distribution_gate_accepts_small_bf16_tail() -> None:
+    reference = _snapshot()
+    candidate = _snapshot()
+    reference["outputs"]["x"] = torch.zeros(1_000)
+    candidate["outputs"]["x"] = torch.zeros(1_000)
+    candidate["outputs"]["x"][:10] = 0.05
+
+    report = compare_step_snapshots(reference, candidate)
+
+    output = report["checks"]["outputs"]
+    assert output["decision"] == "distribution"
+    assert output["max_scaled_error"] == pytest.approx(2.0)
+    assert output["fraction_over_tolerance"] == pytest.approx(0.01)
+    assert output["normalized_rmse"] == pytest.approx(0.2)
+    assert report["ok"]
+
+
+def test_distribution_gate_rejects_catastrophic_outlier() -> None:
+    reference = _snapshot()
+    candidate = _snapshot()
+    reference["next_outputs"]["x"] = torch.zeros(1_000)
+    candidate["next_outputs"]["x"] = torch.zeros(1_000)
+    candidate["next_outputs"]["x"][0] = 0.2
+
+    report = compare_step_snapshots(reference, candidate)
+
+    next_output = report["checks"]["next_outputs"]
+    assert next_output["max_scaled_error"] == pytest.approx(8.0)
+    assert not next_output["ok"]
+    assert report["failed_checks"] == ["next_outputs"]
+
+
 @pytest.mark.skipif(
     os.environ.get("SAKIGO_RUN_CUDA_COMPILE_TESTS") != "1" or not torch.cuda.is_available(),
     reason="set SAKIGO_RUN_CUDA_COMPILE_TESTS=1 to run the compiled BF16 integration gate",
