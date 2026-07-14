@@ -81,11 +81,18 @@ def compute_head_losses(
 def weighted_total_loss(
     head_losses: dict[str, torch.Tensor],
     weights: LossWeights,
+    *,
+    board_area: int,
 ) -> torch.Tensor:
+    if type(board_area) is not int or board_area <= 0:
+        raise ValueError("board_area must be a positive integer")
     weight_map = weights.as_dict()
     total = None
     for head in HEADS:
-        value = head_losses[head] * float(weight_map[head])
+        weight = float(weight_map[head])
+        if head == "score":
+            weight *= board_area
+        value = head_losses[head] * weight
         total = value if total is None else total + value
     if total is None:
         raise ValueError("no losses were provided")

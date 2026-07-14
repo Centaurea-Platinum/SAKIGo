@@ -69,7 +69,9 @@ Training does not mask illegal moves; masking is an inference-time precaution on
 
 Per-head masks; averaging by `mask.float().sum().clamp_min(1.0)` (branchless).
 wdl/policy/budget: soft cross-entropy vs distributions. score: smooth-L1.
-Total = Σ weight_h · loss_h.
+Total = `wdl_weight · wdl + score_weight · N² · score +
+policy_weight · policy + budget_weight · budget`; the active suite uses
+base weight 1 for every head, so score's effective coefficient is 49/64/81.
 
 ## 6. Train/val split
 
@@ -95,7 +97,7 @@ the natural ruleset mixture.
 `model_state`, `optimizer_state`, `scheduler_state`, `step`,
 `model_config` (plain dict), `run_config` (plain dict),
 `rng` (python/torch/cuda states), `sampler_state`,
-`augmentation_state`, `sampler_state_exact`, `checkpoint_schema_version` (=7).
+`augmentation_state`, `sampler_state_exact`, `checkpoint_schema_version` (=8).
 Written atomically (tmp + rename) as `checkpoints/step_%06d.pt`.
 Exact sampler, augmentation, and RNG continuation requires checkpoints produced
 and resumed with `num_workers=0`; the trainer rejects changed trajectory
@@ -103,8 +105,8 @@ properties, prepared-data identity, optimizer state, and prefetched sampler
 states. Backend kernels may still be numerically non-bit-reproducible, so this
 is batch/control-state exactness rather than a promise of bit-identical weights.
 
-Schema 7 retains schema 6's no-ownership model and restores exact sampler and
-augmentation state required for batch-identical resume. Earlier model and
+Schema 8 retains schema 7's exact sampler and augmentation state and binds
+checkpoints to the board-area-scaled score objective. Earlier model and
 optimizer states are intentionally rejected rather than partially migrated.
 
 ## 8. Run directory layout

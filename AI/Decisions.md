@@ -2,6 +2,10 @@
 
 The *why* behind design choices, so later sessions don't relitigate settled ground or lose the reasoning. Newest first. Entries are living until built, then they freeze.
 
+## D41 - Score loss scales with each record's board area (2026-07-15)
+
+The scalar score target remains mover-perspective lead divided by board area. Its smooth-L1 loss is now multiplied by the actual homogeneous batch area, giving effective weights 49, 64, and 81 on 7×7, 8×8, and 9×9; the configurable `score_weight` is an additional base multiplier and is 1 for the active suite. Checkpoint schema advances to 8 so a fixed-weight checkpoint cannot silently resume under the changed objective. **Why:** the former constant weight 81 accidentally treated every size as 9×9. Area-dependent weighting retains the intended normalization while avoiding the same fixed multiplier across all three board sizes. Source: user correction and implementation on 2026-07-15.
+
 ## D40 - Compile parity uses distribution-aware BF16 error gates (2026-07-14)
 
 Mandatory eager-versus-compiled safety preflight retains hard rejection of non-finite tensors and strict elementwise checks for head losses, total loss, and optimizer state. Large output, gradient, parameter, and next-output collections use a hybrid gate instead of failing on their single worst scalar: normalized RMS error, the fraction outside the original elementwise tolerance, and a catastrophic maximum-scaled-error cap must all pass. **Why:** the mixed-data warm-state audit found that the old maximum-only rule rejected deterministic, finite Inductor BF16 results because 1-3 values among 5.6-8.8 million gradients/parameters crossed tolerance, while global parameter relative L2 error remained 0.002-0.005%, output relative L2 error remained about 0.4-0.6%, and weighted-loss disagreement remained at or below 0.03%. A reconstructed unsafe in-graph BF16 GQA SDPA control still produced non-finite outputs, 4.11 loss error, 4.22 gradient error, and scaled errors of 116-574, so the hybrid gate preserves a wide corruption-detection margin. Source: local RTX 5070 Ti compile diagnostics and implementation on 2026-07-14.

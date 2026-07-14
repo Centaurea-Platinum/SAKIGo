@@ -172,7 +172,11 @@ def _captured_train_step(
     with _autocast(device, amp_dtype):
         output = forward_model(batch["board"], batch["rules"])
         head_losses = compute_head_losses(output, batch)
-        total = weighted_total_loss(head_losses, loss_weights)
+        total = weighted_total_loss(
+            head_losses,
+            loss_weights,
+            board_area=int(batch["board"].shape[-2] * batch["board"].shape[-1]),
+        )
     outputs = _clone_mapping(output)
     losses = _clone_mapping(head_losses)
     total_snapshot = {"total": _clone_tensor(total)}
@@ -224,7 +228,11 @@ def _train_step(
     optimizer.zero_grad(set_to_none=True)
     with _autocast(device, amp_dtype):
         output = forward_model(batch["board"], batch["rules"])
-        total = weighted_total_loss(compute_head_losses(output, batch), loss_weights)
+        total = weighted_total_loss(
+            compute_head_losses(output, batch),
+            loss_weights,
+            board_area=int(batch["board"].shape[-2] * batch["board"].shape[-1]),
+        )
     require_finite("benchmark loss", total)
     total.backward()
     torch.nn.utils.clip_grad_norm_(
@@ -720,7 +728,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--wdl-weight", type=float, default=1.0)
-    parser.add_argument("--score-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--score-weight",
+        type=float,
+        default=1.0,
+        help="Base score multiplier; effective weight is this value times board area.",
+    )
     parser.add_argument("--policy-weight", type=float, default=1.0)
     parser.add_argument("--budget-weight", type=float, default=1.0)
     parser.add_argument("--model-config-checkpoint", type=Path)

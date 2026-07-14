@@ -506,7 +506,11 @@ class Trainer:
             with self._autocast():
                 output = self.compiled_model(batch["board"], batch["rules"])
                 head_losses = compute_head_losses(output, batch)
-                total = weighted_total_loss(head_losses, self.loss_weights)
+                total = weighted_total_loss(
+                    head_losses,
+                    self.loss_weights,
+                    board_area=int(batch["board"].shape[-2] * batch["board"].shape[-1]),
+                )
             require_finite("training loss", total)
             total.backward()
             torch.nn.utils.clip_grad_norm_(
@@ -550,7 +554,13 @@ class Trainer:
                 with self._autocast():
                     output = self.compiled_model(batch["board"], batch["rules"])
                     head_losses = compute_head_losses(output, batch)
-                    total = weighted_total_loss(head_losses, self.loss_weights)
+                    total = weighted_total_loss(
+                        head_losses,
+                        self.loss_weights,
+                        board_area=int(
+                            batch["board"].shape[-2] * batch["board"].shape[-1]
+                        ),
+                    )
             except BaseException as error:
                 if self.compile_status.startswith("pending_first_step:"):
                     self.compile_status = (

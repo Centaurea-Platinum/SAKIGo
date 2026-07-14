@@ -111,7 +111,7 @@ def _config(workspace: dict[str, Path], run_name: str, **overrides) -> TrainConf
         val_batches=4,
         progress=False,
         warmup_steps=4,
-        score_weight=81.0,
+        score_weight=1.0,
     )
     base.update(overrides)
     return TrainConfig(**base)
@@ -246,7 +246,7 @@ def test_trainer_smoke_run(workspace: dict[str, Path], spec_patch) -> None:
 
     # weights_only load must succeed (checkpoint contract)
     payload = torch.load(final, map_location="cpu", weights_only=True)
-    assert payload["checkpoint_schema_version"] == 7
+    assert payload["checkpoint_schema_version"] == 8
     assert payload["step"] == 48
     assert payload["run_config"]["model_spec"] == "tiny"
     assert payload["model_config"]["architecture"] == "SakiGoModel"
@@ -433,7 +433,7 @@ def test_suite_layout_uses_structured_train_dirs(
         amp="off",
         device="cpu",
         progress=False,
-        score_weight=81.0,
+        score_weight=3.0,
     )
     paths = build_suite_paths(config)
     train_config = train_config_for_spec(
@@ -455,7 +455,7 @@ def test_suite_layout_uses_structured_train_dirs(
     assert train_config.run_dir == str(config.root / "train" / "tiny")
     assert train_config.log_interval == 0
     assert train_config.checkpoint_interval == 5
-    assert train_config.score_weight == 81.0
+    assert train_config.score_weight == 3.0
 
 
 def test_explicit_suite_batch_still_runs_safety_preflight(
@@ -491,7 +491,7 @@ def test_explicit_suite_batch_still_runs_safety_preflight(
         model_compile="reduce-overhead",
         amp="auto",
         device="cpu",
-        score_weight=81.0,
+        score_weight=3.0,
         grad_clip=0.75,
     )
     paths = build_suite_paths(config)
@@ -500,7 +500,7 @@ def test_explicit_suite_batch_still_runs_safety_preflight(
 
     assert selected == 8 and results
     assert seen[0]["batch_size"] == 8
-    assert seen[0]["loss_weights"].score == 81.0
+    assert seen[0]["loss_weights"].score == 3.0
     assert seen[0]["grad_clip"] == 0.75
     assert seen[0]["warmup_steps"] == config.warmup_steps
 

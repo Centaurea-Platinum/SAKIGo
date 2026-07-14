@@ -216,6 +216,7 @@ def _status_payload(
             "policy": config.policy_weight,
             "budget": config.budget_weight,
         },
+        "score_weighting": "board_area_times_score_weight",
         "log_interval": 0,
         "seed": config.seed,
         "val_fraction": config.val_fraction,
@@ -592,7 +593,12 @@ def parse_args(argv: list[str] | None = None) -> SuiteConfig:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--wdl-weight", type=float, default=1.0)
-    parser.add_argument("--score-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--score-weight",
+        type=float,
+        default=1.0,
+        help="Base score multiplier; effective weight is this value times board area.",
+    )
     parser.add_argument("--policy-weight", type=float, default=1.0)
     parser.add_argument("--budget-weight", type=float, default=1.0)
     args = parser.parse_args(argv)

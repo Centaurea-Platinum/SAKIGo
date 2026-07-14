@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from math import pi
 
 ARCHITECTURE_GROUP_SIZES = {"SakiGoModel": 8}
-CHECKPOINT_SCHEMA_VERSION = 7
+CHECKPOINT_SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True)

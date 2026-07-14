@@ -2,6 +2,11 @@
 
 Dated, newest first. What changed, what is next. One entry per working session.
 
+## 2026-07-15 - Board-area score weighting
+
+- Stopped the initial large-suite attempt before its first nonzero checkpoint after discovering that normalized score smooth-L1 used a fixed weight of 81 for every board size.
+- Changed the effective score coefficient to actual board area (49/64/81) times a base multiplier of 1, updated metrics and compile preflight to use the same objective, and advanced checkpoint schema to 8.
+
 ## 2026-07-14 - Per-board-size and per-ruleset validation curves
 
 - Scheduled a guarded 23,000,000-position one-epoch suite for narrow-deep, balanced, and wide-shallow behind the active six-book index. The launcher will refresh the old allocation after indexing, reserve 6,144 validation records (`2^10` per active board-size/ruleset cohort), then sample, prepare, safety-preflight, and train sequentially; an hourly task monitor reports state changes without disturbing the live index.

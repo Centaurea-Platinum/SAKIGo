@@ -39,6 +39,7 @@ class TrainConfig:
     compile: str = "reduce-overhead"  # off|default|reduce-overhead
     # loss weights
     wdl_weight: float = 1.0
+    # Effective score weight is score_weight * the current batch's board area.
     score_weight: float = 1.0
     policy_weight: float = 1.0
     budget_weight: float = 1.0

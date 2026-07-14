@@ -157,6 +157,12 @@ class MetricAccumulator:
             count = batch[f"{head}_mask"].sum()
             self._sum(f"{head}_count", count)
             self._sum(f"{head}_loss", head_losses[head].detach() * count)
+            if head == "score":
+                board_area = int(batch["board"].shape[-2] * batch["board"].shape[-1])
+                self._sum(
+                    "score_area_loss",
+                    head_losses[head].detach() * count * board_area,
+                )
         self._add_wdl(output, batch)
         for head in ACTION_HEADS:
             self._add_action(output, batch, head)
@@ -215,7 +221,11 @@ class MetricAccumulator:
             out[f"{head}_loss"] = sums.get(f"{head}_loss", 0.0) / count if count else _nan()
             out[f"{head}_target_count"] = count
             if count:
-                total += self.loss_weights[head] * out[f"{head}_loss"]
+                if head == "score":
+                    score_area_loss = sums.get("score_area_loss", 0.0) / count
+                    total += self.loss_weights[head] * score_area_loss
+                else:
+                    total += self.loss_weights[head] * out[f"{head}_loss"]
         out["loss"] = total if self.steps else _nan()
         wdl_total = sums.get("wdl_total", 0.0)
         out["wdl_acc"] = sums.get("wdl_correct", 0.0) / wdl_total if wdl_total else _nan()

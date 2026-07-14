@@ -14,7 +14,8 @@ For each sampled book node:
   coordinate receives the row's full `v` count before normalization. Adjusted
   visits (`av`) are not used. Pages containing `other` remain eligible.
 - Score is the rounded optimal book `ssM`, converted to mover perspective and
-  divided by the active board area.
+  divided by the active board area. Its normalized smooth-L1 training loss is
+  multiplied by that same board area (49, 64, or 81).
 - WDL is one-hot draw when rounded score is zero. Otherwise book `wl` supplies
   soft W/L mass, with draw and no-result set to zero.
 

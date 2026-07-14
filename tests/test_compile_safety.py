@@ -106,7 +106,7 @@ def test_current_models_complete_compiled_bf16_preflight() -> None:
             max_seconds=5.0,
             compile_mode="reduce-overhead",
             amp="auto",
-            loss_weights=LossWeights(score=81.0),
+            loss_weights=LossWeights(score=1.0),
             seed=20260713,
         )
         assert result["reason"] == "ok", (spec, result)

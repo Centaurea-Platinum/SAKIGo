@@ -264,7 +264,8 @@ def run(
         validation_data=[str(path.resolve()) for path in validation_sources],
         specs=list(DEFAULT_SPECS),
         epochs=1,
-        score_weight=81.0,
+        score_weight=1.0,
+        score_weighting="board_area",
         model_compile=model_compile,
         batch_size=batch_size,
         benchmark_budget_fraction=benchmark_budget_fraction,
@@ -290,7 +291,7 @@ def run(
                 amp="auto",
                 device="cuda",
                 augment_d4=False,
-                score_weight=81.0,
+                score_weight=1.0,
                 progress=False,
             )
         )
