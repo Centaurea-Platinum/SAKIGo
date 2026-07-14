@@ -31,7 +31,7 @@ def normalize(values: Sequence[float]) -> list[float]:
 class ConcreteBookMove:
     actions: tuple[int, ...]
     score_lead: float
-    a_visits: float
+    visits: float
     wl: float | None = None
     is_other: bool = False
 
@@ -66,11 +66,13 @@ def book_budget(
 ) -> list[float]:
     budget = [0.0] * action_count
     for move in _concrete(moves):
-        if move.a_visits < 0:
-            raise ValueError("AVisits must be non-negative")
-        share = move.a_visits / len(move.actions)
+        if move.visits < 0:
+            raise ValueError("visits must be non-negative")
         for action in move.actions:
-            budget[action] += share
+            # KataGo's exported visit count belongs to the representative move.
+            # Every coordinate in xy is a symmetry-equivalent concrete action,
+            # so each member of that orbit receives the full count.
+            budget[action] += move.visits
     return normalize(budget)
 
 

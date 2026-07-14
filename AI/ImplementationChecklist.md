@@ -62,7 +62,8 @@ not to perform ceremony.
 - [ ] Are targets normalized and masked consistently: WDL distribution, score,
       policy, budget, legal mask, pass entry, and any legacy optional fields?
 - [ ] Is the current book mapping preserved? Budget is normalized over concrete
-      `AVisits`; policy is uniform over tied rounded-optimum concrete moves;
+      raw visits (`v`), replicated across listed symmetry-equivalent actions;
+      policy is uniform over tied rounded-optimum concrete moves;
       aggregate `other` affects WDL/score but is not an action target.
 - [ ] Is illegal-move masking applied only at the intended layer? Current design
       uses raw model logits during training; checkpoint-policy evaluation may

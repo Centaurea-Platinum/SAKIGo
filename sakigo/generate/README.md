@@ -45,7 +45,9 @@ ruleset so their loss curves remain separately comparable.
 
 Pages containing an `other` row remain eligible. Only the `other` row is
 discarded when constructing concrete targets. Policy assigns equal mass to
-concrete moves tied after score rounding, budget normalizes concrete `AVisits`,
+concrete moves tied after score rounding. Budget normalizes raw concrete visits
+(`v`), assigning a representative row's full count to every listed
+symmetry-equivalent action before normalization; adjusted visits (`av`) are not used.
 score uses rounded `ssM`, and W/L uses `wl` with rounded zero score mapped to
 draw. Canonical book nodes deduplicate symmetries and transposed move orders;
 the frozen sample table additionally prevents a node from appearing twice or

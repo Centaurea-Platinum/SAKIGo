@@ -9,7 +9,7 @@ One JSON object per line. Fields (targets may nest under `targets`):
 
 | Field | Type / shape | Notes |
 |---|---|---|
-| `schema_version` | int = 1 or 2 | v2 permits equal-optimal soft policy targets |
+| `schema_version` | int = 1, 2, or 3 | v2 permits equal-optimal soft policy targets; v3 identifies raw-visit budget semantics |
 | `board_size` | JSON int N | square boards only; booleans/floats/strings are rejected |
 | `ply` | JSON int | booleans/floats/strings are rejected |
 | `position_key` | str | non-empty provenance key; current book records use a BLAKE2b digest of the model-visible input |
@@ -20,19 +20,20 @@ One JSON object per line. Fields (targets may nest under `targets`):
 | `score` | float | mover-perspective lead **÷ board area** |
 | `ownership` | float[N²] ∈ [−1,1] | optional legacy target, mover perspective (+1 = mine); absent from current book records |
 | `policy` | float[N²+1] | action distribution; current books use uniform tied rounded-optimum concrete moves; **pass = last index** |
-| `budget` | float[N²+1] | action distribution; current books normalize concrete `AVisits` after discarding `other` |
+| `budget` | float[N²+1] | action distribution; current books normalize raw concrete visits (`v`) after discarding `other`; each symmetry-equivalent coordinate receives its representative row's full count |
 | `legal_mask` | bool[N²+1] | JSON booleans only; pass last and always true |
 | `source` | object | provenance, not consumed by training |
 
 Every target is optional per record; absent targets get mask=False in batches.
-Schema v1 retains the original strictly one-hot policy invariant. Schema v2 is
-used by book distillation and permits policy mass to be uniform across
-rounded-equal optimal book moves. Both action targets must
+Schema v1 retains the original strictly one-hot policy invariant. Schema v2
+permits policy mass to be uniform across rounded-equal optimal book moves.
+Schema v3 retains that policy contract and identifies corrected book budgets
+that use raw visits (`v`) expanded across symmetry-equivalent actions. Both action targets must
 assign zero mass to actions rejected by `legal_mask`.
 
-Migration: v1 readers remain valid for legacy generated data. Readers that
-consume the mixed small-board book dataset must accept v2 distributions; all
-other fields and batch layouts are unchanged.
+Migration: current readers retain v1 and v2 support for legacy generated data.
+New mixed-small-board book records use v3; all field shapes and batch layouts
+are unchanged.
 
 ## 2. Board planes (index order)
 

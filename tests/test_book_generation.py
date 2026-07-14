@@ -15,6 +15,7 @@ from sakigo.constants import BOARD_PLANE_COUNT, DISTILLATION_SCHEMA_VERSION
 from sakigo.data.records import record_from_json
 from sakigo.generate.book import (
     assign_validated_histories,
+    book_target_eligible,
     count_book_target_eligible,
     freeze_uniform_sample,
     index_book_archive,
@@ -72,14 +73,14 @@ def _synthetic_archive(path: Path, board_size: int = 9) -> None:
             parent=None,
             board=empty,
             links="{0:'child.html'}",
-            moves="[{xy:[[0,0]],ssM:0,wl:0,av:10},{move:'other',av:3}]",
+            moves="[{xy:[[0,0]],ssM:0,wl:0,v:10},{move:'other',v:3}]",
         ),
         "html/child.html": _page(
             next_player=2,
             parent="index.html",
             board=child,
             links="{}",
-            moves="[{move:'pass',ssM:0,wl:0,av:8},{move:'other',av:2}]",
+            moves="[{move:'pass',ssM:0,wl:0,v:8},{move:'other',v:2}]",
         ),
     }
     with tarfile.open(path, "w:gz") as handle:
@@ -94,7 +95,7 @@ def test_real_page_literal_shape_and_actions() -> None:
     raw = page_constants(
         """const nextPla=1;const pLink=null;const pSym=0;
         const board=[0,0,0];const links={15:'child.html'};const linkSyms={15:1};
-        const moves=[{xy:[[6,1]],ssM:2.3,wl:0.5,av:10},{move:'other',av:4}];"""
+        const moves=[{xy:[[6,1]],ssM:2.3,wl:0.5,v:10},{move:'other',v:4}];"""
     )
     assert raw["nextPla"] == 1 and raw["links"] == {15: "child.html"}
     assert row_actions(raw["moves"][0]) == (15,)
@@ -114,7 +115,7 @@ def test_archive_index_replay_sample_and_book_record(tmp_path: Path) -> None:
             """INSERT INTO nodes
                (node_id,next_player,parent_symmetry,board_json,moves_json,ply,
                 history_json,page_to_history_symmetry,valid)
-               VALUES('terminal','B',0,'[]','[{"move":"other","av":10}]',
+               VALUES('terminal','B',0,'[]','[{"move":"other","v":10}]',
                       0,'[]',0,1)"""
         )
     assert freeze_uniform_sample(
@@ -134,6 +135,29 @@ def test_archive_index_replay_sample_and_book_record(tmp_path: Path) -> None:
         assert sum(record["policy"]) == pytest.approx(1.0)
         assert sum(record["budget"]) == pytest.approx(1.0)
         record_from_json(record)
+
+    with pytest.raises(ValueError, match="already frozen"):
+        freeze_uniform_sample(
+            database, train_count=1, validation_count=1, seed=8
+        )
+    assert freeze_uniform_sample(
+        database,
+        train_count=1,
+        validation_count=1,
+        seed=8,
+        replace_existing=True,
+    ) == {"train": 1, "validation": 1, "total": 2}
+
+
+def test_target_eligibility_requires_raw_visits_not_adjusted_visits() -> None:
+    raw_visits = json.dumps(
+        [{"xy": [[0, 0]], "ssM": 0, "wl": 0, "v": 10, "av": 0}]
+    )
+    adjusted_only = json.dumps(
+        [{"xy": [[0, 0]], "ssM": 0, "wl": 0, "av": 10}]
+    )
+    assert book_target_eligible(raw_visits, "B", board_size=7)
+    assert not book_target_eligible(adjusted_only, "B", board_size=7)
 
 
 def test_variable_board_japanese_book_record(tmp_path: Path) -> None:
@@ -175,9 +199,9 @@ def test_book_preprocessing_is_identical_across_board_sizes(board_size: int) -> 
         "node_id": f"empty-{board_size}",
         "history": [],
         "moves": [
-            {"xy": [[0, 0]], "ssM": -1.24, "wl": -0.4, "av": 30},
-            {"xy": [[1, 0]], "ssM": -1.20, "wl": -0.2, "av": 10},
-            {"move": "other", "ssM": -99, "wl": -1, "av": 10_000},
+            {"xy": [[0, 0]], "ssM": -1.24, "wl": -0.4, "v": 30, "av": 1},
+            {"xy": [[1, 0]], "ssM": -1.20, "wl": -0.2, "v": 10, "av": 100},
+            {"move": "other", "ssM": -99, "wl": -1, "v": 10_000},
         ],
         "page_to_history_symmetry": 0,
         "split": "train",
@@ -399,28 +423,28 @@ def test_prepare_uses_only_manifest_listed_shards(
 
 def test_other_row_is_dropped_but_page_targets_remain() -> None:
     moves = [
-        ConcreteBookMove((0, 8), score_lead=1.24, a_visits=30),
-        ConcreteBookMove((4,), score_lead=1.26, a_visits=10),
-        ConcreteBookMove((), score_lead=99, a_visits=1000, is_other=True),
+        ConcreteBookMove((0, 8), score_lead=1.24, visits=30),
+        ConcreteBookMove((4,), score_lead=1.26, visits=10),
+        ConcreteBookMove((), score_lead=99, visits=1000, is_other=True),
     ]
     policy, score = book_policy(moves, to_move=BLACK, action_count=10)
     assert score == 1.5 and policy[4] == 1.0
     budget = book_budget(moves, action_count=10)
-    assert budget[0] == budget[8] == pytest.approx(0.375)
-    assert budget[4] == pytest.approx(0.25)
+    assert budget[0] == budget[8] == pytest.approx(3 / 7)
+    assert budget[4] == pytest.approx(1 / 7)
 
 
 def test_equal_rounded_optima_are_uniform() -> None:
     moves = [
-        ConcreteBookMove((0, 8), score_lead=-1.24, a_visits=1),
-        ConcreteBookMove((4,), score_lead=-1.10, a_visits=1),
+        ConcreteBookMove((0, 8), score_lead=-1.24, visits=1),
+        ConcreteBookMove((4,), score_lead=-1.10, visits=1),
     ]
     policy, score = book_policy(moves, to_move=WHITE, action_count=10)
     assert score == -1.0
     assert policy[0] == policy[4] == policy[8] == pytest.approx(1 / 3)
 
 
-def test_schema_v2_accepts_soft_book_policy() -> None:
+def test_current_distillation_schema_accepts_soft_book_policy() -> None:
     ruleset = ruleset_from_name("tromp-taylor")
     raw = {
         "schema_version": DISTILLATION_SCHEMA_VERSION,
@@ -434,6 +458,24 @@ def test_schema_v2_accepts_soft_book_policy() -> None:
         "legal_mask": [True] * 10,
     }
     assert record_from_json(raw).policy[:2].tolist() == pytest.approx([0.5, 0.5])
+
+
+def test_schema_v2_remains_readable() -> None:
+    ruleset = ruleset_from_name("tromp-taylor")
+    raw = {
+        "schema_version": 2,
+        "board_size": 3,
+        "ply": 0,
+        "position_key": "legacy-v2-position",
+        "ruleset": ruleset.metadata(),
+        "board_planes": [0.0] * (BOARD_PLANE_COUNT * 9),
+        "rule_features": ruleset.rule_features(
+            to_move=BLACK, captures=(0, 0), board_area=9
+        ),
+        "policy": [0.5, 0.5] + [0.0] * 8,
+        "legal_mask": [True] * 10,
+    }
+    assert record_from_json(raw).schema_version == 2
 
 
 def test_cli_defaults_to_requested_power_of_two_counts(tmp_path: Path) -> None:

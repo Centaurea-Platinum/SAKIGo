@@ -70,7 +70,7 @@ def concrete_book_moves(
             ConcreteBookMove(
                 actions=actions,
                 score_lead=0.0 if ss_m is None else -ss_m,
-                a_visits=_row_number(row, "av", "AVisits", "aVisits") or 0.0,
+                visits=_row_number(row, "v", "visits", "Visits") or 0.0,
                 wl=_row_number(row, "wl", "winLossValue"),
                 is_other=label == "other" or bool(row.get("isOther", False)),
             )

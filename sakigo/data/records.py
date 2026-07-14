@@ -256,7 +256,7 @@ def record_from_json(raw: Mapping[str, Any], path: Path | None = None, line_numb
             raise ValueError(f"{label} {field} must be an integer")
     if not isinstance(position_key, str):
         raise ValueError(f"{label} position_key must be a string")
-    if schema_version not in {SCHEMA_VERSION, DISTILLATION_SCHEMA_VERSION}:
+    if schema_version not in {SCHEMA_VERSION, 2, DISTILLATION_SCHEMA_VERSION}:
         raise ValueError(f"{label} uses unsupported schema_version {schema_version}")
     if board_size <= 0:
         raise ValueError(f"{label} board_size must be positive")

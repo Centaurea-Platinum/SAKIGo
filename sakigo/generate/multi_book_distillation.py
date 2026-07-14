@@ -31,7 +31,7 @@ DEFAULT_TRAIN_SAMPLES = 1 << 20
 DEFAULT_VALIDATION_SAMPLES = 1 << 12
 DEFAULT_SAMPLES_PER_SHARD = 1 << 16
 PIPELINE_VERSION = 1
-SAMPLE_ALLOCATION_VERSION = 2
+SAMPLE_ALLOCATION_VERSION = 3
 T = TypeVar("T")
 
 
@@ -273,6 +273,7 @@ def stage_index(args: argparse.Namespace, specs: tuple[BookSpec, ...]) -> None:
             validation_count=counts["validation"],
             seed=args.selection_seed,
             board_size=spec.board_size,
+            replace_existing=True,
         )
 
     frozen = _run_parallel(specs, args.workers, freeze)
@@ -485,7 +486,10 @@ def stage_sample(args: argparse.Namespace, specs: tuple[BookSpec, ...]) -> None:
                 ),
                 "score": "round Black score lead to nearest 0.5, then normalize by area",
                 "policy": "uniform mass over concrete moves tied at rounded optimum",
-                "budget": "normalize concrete AVisits after dropping other",
+                "budget": (
+                    "normalize raw concrete visits after dropping other; apply each "
+                    "representative count to every symmetry-equivalent action"
+                ),
                 "wdl": "draw at rounded score zero, otherwise book W/L",
                 "other": "retain page, discard other row from concrete targets",
             },

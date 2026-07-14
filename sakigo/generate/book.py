@@ -511,7 +511,7 @@ def book_target_eligible(
             visits_raw = next(
                 (
                     row[name]
-                    for name in ("av", "AVisits", "aVisits")
+                    for name in ("v", "visits", "Visits")
                     if row.get(name) is not None
                 ),
                 0.0,
@@ -614,6 +614,7 @@ def freeze_uniform_sample(
     validation_count: int,
     seed: int,
     board_size: int = 9,
+    replace_existing: bool = False,
 ) -> dict[str, int]:
     """Freeze an exact, uniform hash sample of valid canonical book nodes."""
 
@@ -661,9 +662,14 @@ def freeze_uniform_sample(
         if metadata is not None:
             expected = (seed, train_count, validation_count)
             if tuple(map(int, metadata)) != expected:
-                raise ValueError(
-                    f"book sample is already frozen as {tuple(metadata)}, requested {expected}"
-                )
+                if not replace_existing:
+                    raise ValueError(
+                        "book sample is already frozen as "
+                        f"{tuple(metadata)}, requested {expected}"
+                    )
+                connection.execute("DELETE FROM sample_metadata")
+                metadata = None
+        if metadata is not None:
             sampled, ineligible = connection.execute(
                 """SELECT COUNT(*),
                           COALESCE(SUM(target_eligible(n.moves_json,n.next_player)=0),0)

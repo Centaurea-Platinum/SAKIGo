@@ -67,7 +67,7 @@ Keep the AI notes current without waiting to be prompted: when code, design docs
 - [Winrate.md](../Design/Output/Winrate.md) - length-4 win/draw/loss/no-result output.
 - [Score.md](../Design/Output/Score.md) - scalar score divided by board area first; percentile heads later.
 - [Ownership.md](../Design/Output/Ownership.md) - not currently considered; the active dataset and model have no ownership target/head.
-- [Policy+Budget.md](../Design/Output/Policy+Budget.md) - current book mapping: budget is the normalized concrete `AVisits` distribution and policy is uniform over tied rounded-optimum concrete moves; pass is the final logit.
+- [Policy+Budget.md](../Design/Output/Policy+Budget.md) - current book mapping: budget normalizes raw concrete visits (`v`) after expanding symmetry-equivalent coordinates, and policy is uniform over tied rounded-optimum concrete moves; pass is the final logit.
 - [FeatureAuxiliary.md](../Design/Output/FeatureAuxiliary.md) and [TimeAuxiliary.md](../Design/Output/TimeAuxiliary.md) - **not currently considered**.
 
 **Pipeline**
@@ -77,7 +77,7 @@ Keep the AI notes current without waiting to be prompted: when code, design docs
 
 ## Glossary
 
-- **Budget head** - current distillation target for the normalized concrete-move `AVisits` distribution in a book row; no search-time role is assumed in the current scope.
+- **Budget head** - current distillation target for normalized raw concrete visits (`v`), with the representative count replicated across listed symmetry-equivalent actions; no search-time role is assumed in the current scope.
 - **Bottleneck width (`n`)** - working channel count inside each board block; the packaged sweep trades it against block count at fixed `m = 128` and fixed `L*n = 1024`, while parameter counts vary.
 - **Regular representation** - D4 feature layout with one component for each of the 8 board symmetries.
 - **Register tokens** - global tokens shaped as regular features in the main model; they are equivariant, not merely invariant.

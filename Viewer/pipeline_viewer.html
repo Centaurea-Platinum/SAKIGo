@@ -186,7 +186,7 @@ const NODES = [
     role:"Numbered compressed JSONL shards containing current-player inputs and direct book targets.",
     inputs:["frozen sampled positions"],
     outputs:["board_planes 6·N²", "rule_features[10]", "wdl[4] / score", "policy & budget (N²+1, pass last)", "legal_mask", "book provenance"],
-    inv:["budget = normalized concrete AVisits", "policy = uniform over tied rounded-optimum concrete moves", "aggregate other contributes to WDL/score, never to action targets"] },
+    inv:["budget = normalized raw visits, replicated across symmetry-equivalent actions", "policy = uniform over tied rounded-optimum concrete moves", "aggregate other contributes to WDL/score, never to action targets"] },
   // training lane
   { lane:"train", id:"prepare", t:"Tensor preparation", s:"sakigo/data/prepare.py",
     role:"Converts only the manifest-listed record shards into an immutable mmap tensor generation, then atomically switches the prepared manifest.",
@@ -332,7 +332,7 @@ function renderRecord() {
   tg.innerHTML = "<h2>Targets (current-player perspective)</h2>";
   const row2 = document.createElement("div"); row2.className = "boards";
   const maxB = Math.max(...r.budget.slice(0, area), r.budget[area], 1e-9);
-  row2.appendChild(boardBlock("budget (normalized AVisits)",
+  row2.appendChild(boardBlock("budget (normalized raw visits)",
     drawGrid(n, i => heat(r.budget[i] / maxB)), `pass = ${(r.budget[area]).toFixed(4)}`));
   row2.appendChild(boardBlock("policy (rounded-optimum ties)",
     drawGrid(n, i => heat(r.policy[i])), `pass = ${(r.policy[area]).toFixed(4)}`));
